@@ -2,13 +2,13 @@
 {# Copyright The IETF Trust 2015, All Rights Reserved #}
 {% load origin %}
 {% load static %}
-{% load ietf_filters textfilters %}
+{% load ietf_filters textfilters tz %}
 {% block title %}{{ doc.title|default:"Untitled" }}{% endblock %}
 {% block content %}
     {% origin %}
     {{ top|safe }}
     {% include "doc/revisions_list.html" %}
-    <div id="timeline"></div>
+    <div id="doc-timeline"></div>
     {% if doc.rev != latest_rev %}
         <div class="alert alert-warning my-3">The information below is for an old version of the document.</div>
     {% endif %}
@@ -19,16 +19,34 @@
                     {% if doc.meeting_related %}Meeting{% endif %}
                     {{ doc.type.name }}
                 </th>
-                <td></td>
+                <td class="edit"></td>
                 <td>
                     {% if doc.group %}
                         {{ doc.group.name }}
                         <a href="{{ doc.group.about_url }}">({{ doc.group.acronym }})</a>
                         {{ doc.group.type.name }}
                     {% endif %}
-                    {% if snapshot %}<span class="badge rounded-pill bg-warning">Snapshot</span>{% endif %}
+                    {% if snapshot %}<span class="badge rounded-pill text-bg-warning">Snapshot</span>{% endif %}
                 </td>
             </tr>
+            {% if doc.meeting_related %}
+                <tr>
+                    <th scope="row">
+                        Date and time
+                    </th>
+                    <td class="edit"></td>
+                    <td>
+                        {% with session=doc.get_related_session %}
+                        {% with timeslot=session.official_timeslotassignment.timeslot %}
+                            {% if session.meeting %}
+                                <a href="{% url 'ietf.meeting.views.session_details' num=session.meeting.number acronym=session.group.acronym %}" class="session-time date me-3" data-start-utc="{{ timeslot.time|utc|date:'Y-m-d H:i' }}" data-end-utc="{{ timeslot.end_time|utc|date:'Y-m-d H:i' }}">{{ timeslot.time|utc|date:'Y-m-d H:i' }}</a>
+                                {% include "meeting/tz-display.html" with meeting_timezone=session.meeting.time_zone id_suffix="" minimal=True only %}
+                            {% endif %}
+                        {% endwith %}
+                        {% endwith %}
+                    </td>
+                </tr>
+            {% endif %}
             <tr>
                 <th scope="row">Title</th>
                 <td class="edit">
@@ -36,7 +54,7 @@
                         {% doc_edit_button 'ietf.doc.views_material.edit_material' name=doc.name action="title" %}
                     {% endif %}
                 </td>
-                <th scope="row">{{ doc.title|default:'<span class="text-muted">(None)</span>' }}</th>
+                <th scope="row">{{ doc.title|default:'<span class="text-body-secondary">(None)</span>' }}</th>
             </tr>
             {% if doc.abstract or doc.type_id == 'slides' and can_manage_material and not snapshot %}
                 <tr>
@@ -60,7 +78,7 @@
                     {% if doc.get_state.name %}
                         {{ doc.get_state.name }}
                     {% else %}
-                        <span class="text-muted">(None)</span>
+                        <span class="text-body-secondary">(None)</span>
                     {% endif %}
                 </td>
             </tr>
@@ -97,10 +115,24 @@
                             {% if presentations %}
                                 {% for pres in presentations %}
                                     {{ pres.session.short_name }} at {{ pres.session.meeting }}
-                                    {% if pres.rev != doc.rev %}(version -{{ pres.rev }}){% endif %}{% if not forloop.last %},{% endif %}
+                                    {% if pres.rev != doc.rev %}(version -{{ pres.rev }}){% endif %}
+                                    <br>
+                                    <b>Remote instructions:</b>
+                                    {% if pres.session.agenda_note|first_url|conference_url %}
+                                        <a href="{{ pres.session.agenda_note|first_url }}" title="Online conference">
+                                            <i class="bi bi-beople"></i>
+                                        </a>
+                                    {% elif pres.session.remote_instructions|first_url|conference_url %}
+                                        <a href="{{ pres.session.remote_instructions|first_url }}"
+                                           title="Online conference">
+                                            <i class="bi bi-people"></i>
+                                        </a>
+                                    {% endif %}
+                                    {{ pres.session.remote_instructions|linkify }}
+                                    {% if not forloop.last %}<br>{% endif %}
                                 {% endfor %}
                             {% else %}
-                                <span class="text-muted">(None)</span>
+                                <span class="text-body-secondary">(None)</span>
                             {% endif %}
                         </td>
                     </tr>
@@ -121,9 +153,12 @@
             </a>
         {% endif %}
     </p>
+    {% if session_statusid == "canceled" %}
+       <div class="alert alert-warning">The session for this document was cancelled.</div>
+    {% endif %}
     <div id="materials-content" class="card mt-5">
         <div class="card-header">{{ doc.name }}-{{ doc.rev }}</div>
-        <div class="card-body">
+        <div class="card-body{% if content_is_html %} text-break{% endif %}">
             {% if doc.rev and content != None %}
                 {% if content_is_html %}
                     {{ content|sanitize|safe }}
@@ -142,4 +177,16 @@
 {% block js %}
     <script src="{% static 'ietf/js/d3.js' %}"></script>
     <script src="{% static 'ietf/js/document_timeline.js' %}"></script>
+    {% if doc.meeting_related %}
+        <script src="{% static 'ietf/js/moment.js' %}"></script>
+        <script src="{% static 'ietf/js/upcoming.js' %}"></script>
+        <script src="{% static 'ietf/js/timezone.js' %}"></script>
+        <script>
+        $(function () {
+                // Init with best guess at local timezone.
+                ietf_timezone.set_tz_change_callback(timezone_changed);
+                ietf_timezone.initialize('local');
+        });
+        </script>
+    {% endif %}
 {% endblock %}

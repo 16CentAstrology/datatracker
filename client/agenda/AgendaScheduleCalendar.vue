@@ -11,14 +11,17 @@ n-drawer(v-model:show='isShown', placement='bottom', :height='state.drawerHeight
             n-button(
               :type='agendaStore.isTimezoneMeeting ? `primary` : `default`'
               @click='setTimezone(`meeting`)'
+              :text-color='agendaStore.isTimezoneMeeting ? `#FFF` : null'
               ) Meeting
             n-button(
               :type='agendaStore.isTimezoneLocal ? `primary` : `default`'
               @click='setTimezone(`local`)'
+              :text-color='agendaStore.isTimezoneLocal ? `#FFF` : null'
               ) Local
             n-button(
               :type='agendaStore.timezone === `UTC` ? `primary` : `default`'
               @click='setTimezone(`UTC`)'
+              :text-color='agendaStore.timezone === `UTC` ? `#FFF` : null'
               ) UTC
           n-divider(vertical)
         n-button.me-2(
@@ -32,7 +35,7 @@ n-drawer(v-model:show='isShown', placement='bottom', :height='state.drawerHeight
           n-badge.ms-2(:value='agendaStore.selectedCatSubs.length', processing)
         n-button(
           ghost
-          color='gray'
+          :color='siteStore.theme === `dark` ? `#e35d6a` : `gray`'
           strong
           @click='close'
           )
@@ -81,11 +84,10 @@ import {
   NPopover
 } from 'naive-ui'
 
-import '@fullcalendar/core/vdom' // solves problem with Vite
 import FullCalendar from '@fullcalendar/vue3'
 import timeGridPlugin from '@fullcalendar/timegrid'
 import interactionPlugin from '@fullcalendar/interaction'
-import luxonPlugin from '@fullcalendar/luxon2'
+import luxonPlugin from '@fullcalendar/luxon3'
 import bootstrap5Plugin from '@fullcalendar/bootstrap5'
 
 import AgendaDetailsModal from './AgendaDetailsModal.vue'

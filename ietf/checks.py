@@ -29,81 +29,6 @@ def already_ran():
         return False
 
 @checks.register('directories')
-def check_cdn_directory_exists(app_configs, **kwargs):
-    """This checks that the path from which the CDN will serve static files for
-       this version of the datatracker actually exists.  In development and test
-       mode STATIC_ROOT will normally be just static/, but in production it will be
-       set to a different part of the file system which is served via CDN, and the
-       path will contain the datatracker release version.
-    """
-    if already_ran():
-        return []
-    #
-    errors = []
-    if settings.SERVER_MODE == 'production' and not os.path.exists(settings.STATIC_ROOT):
-        errors.append(checks.Error(
-            "The static files directory has not been set up.",
-            hint="Please run 'ietf/manage.py collectstatic'.",
-            obj=None,
-            id='datatracker.E001',
-        ))
-    return errors
-
-@checks.register('files')
-def check_group_email_aliases_exists(app_configs, **kwargs):
-    from ietf.group.views import check_group_email_aliases
-    #
-    if already_ran():
-        return []
-    #
-    errors = []
-    try:
-        ok = check_group_email_aliases()
-        if not ok:
-            errors.append(checks.Error(
-                "Found no aliases in the group email aliases file\n'%s'."%settings.GROUP_ALIASES_PATH,
-                hint="Please run the generate_group_aliases management command to generate them.",
-                obj=None,
-                id="datatracker.E0002",
-            ))
-    except IOError as e:
-        errors.append(checks.Error(
-            "Could not read group email aliases:\n   %s" % e,
-            hint="Please run the generate_group_aliases management command to generate them.",
-            obj=None,
-            id="datatracker.E0003",
-        ))
-        
-    return errors
-
-@checks.register('files')
-def check_doc_email_aliases_exists(app_configs, **kwargs):
-    from ietf.doc.views_doc import check_doc_email_aliases
-    #
-    if already_ran():
-        return []
-    #
-    errors = []
-    try:
-        ok = check_doc_email_aliases()
-        if not ok:
-            errors.append(checks.Error(
-                "Found no aliases in the document email aliases file\n'%s'."%settings.DRAFT_VIRTUAL_PATH,
-                hint="Please run the generate_draft_aliases management command to generate them.",
-                obj=None,
-                id="datatracker.E0004",
-            ))
-    except IOError as e:
-        errors.append(checks.Error(
-            "Could not read document email aliases:\n   %s" % e,
-            hint="Please run the generate_draft_aliases management command to generate them.",
-            obj=None,
-            id="datatracker.E0005",
-        ))
-
-    return errors
-    
-@checks.register('directories')
 def check_id_submission_directories(app_configs, **kwargs):
     #
     if already_ran():
@@ -114,7 +39,7 @@ def check_id_submission_directories(app_configs, **kwargs):
         p = getattr(settings, s)
         if not os.path.exists(p):
             errors.append(checks.Critical(
-                "A directory used by the ID submission tool does not\n"
+                "A directory used by the I-D submission tool does not\n"
                 "exist at the path given in the settings file.  The setting is:\n"
                 "    %s = %s" % (s, p),
                 hint = ("Please either update the local settings to point at the correct\n"
@@ -134,7 +59,7 @@ def check_id_submission_files(app_configs, **kwargs):
         p = getattr(settings, s)
         if not os.path.exists(p):
             errors.append(checks.Critical(
-                "A file used by the ID submission tool does not exist\n"
+                "A file used by the I-D submission tool does not exist\n"
                 "at the path given in the settings file.  The setting is:\n"
                 "    %s = %s" % (s, p),
                 hint = ("Please either update the local settings to point at the correct\n"
@@ -179,7 +104,7 @@ def check_id_submission_checkers(app_configs, **kwargs):
         except Exception as e:
             errors.append(checks.Critical(
                 "An exception was raised when trying to import the\n"
-                "draft submission checker class '%s':\n    %s" % (checker_path, e),
+                "Internet-Draft submission checker class '%s':\n    %s" % (checker_path, e),
                 hint = "Please check that the class exists and can be imported.\n",
                 id = "datatracker.E0008",
             ))
@@ -188,7 +113,7 @@ def check_id_submission_checkers(app_configs, **kwargs):
         except Exception as e:
             errors.append(checks.Critical(
                 "An exception was raised when trying to instantiate\n"
-                "the draft submission checker class '%s':\n    %s" % (checker_path, e),
+                "the Internet-Draft submission checker class '%s':\n    %s" % (checker_path, e),
                 hint = "Please check that the class can be instantiated.\n",
                 id = "datatracker.E0009",
             ))
@@ -196,7 +121,7 @@ def check_id_submission_checkers(app_configs, **kwargs):
         for attr in ('name',):
             if not hasattr(checker, attr):
                 errors.append(checks.Critical(
-                    "The draft submission checker\n    '%s'\n"
+                    "The Internet-Draft submission checker\n    '%s'\n"
                     "has no attribute '%s', which is required" % (checker_path, attr),
                     hint = "Please update the class.\n",
                     id = "datatracker.E0010",
@@ -207,7 +132,7 @@ def check_id_submission_checkers(app_configs, **kwargs):
                 break
         else:
             errors.append(checks.Critical(
-                "The draft submission checker\n    '%s'\n"
+                "The Internet-Draft submission checker\n    '%s'\n"
                 " has no recognised checker method;  "
                 "should be one or more of %s." % (checker_path, checker_methods),
                 hint = "Please update the class.\n",

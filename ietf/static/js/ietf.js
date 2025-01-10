@@ -57,7 +57,7 @@ $(document)
                 var text = $(this)
                     .text();
                 // insert some <wbr> at strategic places
-                var newtext = text.replace(/([@._])/g, "$1<wbr>");
+                var newtext = text.replace(/(\S)([@._+])(\S)/g, "$1$2<wbr>$3");
                 if (newtext === text) {
                     return;
                 }
@@ -91,20 +91,29 @@ $(document)
         //     });
     });
 
+function overflowShadows(el) {
+    function handleScroll(){
+        const canScrollUp = el.scrollTop > 0
+        const canScrollDown = el.offsetHeight + el.scrollTop < el.scrollHeight
+        el.classList.toggle("overflow-shadows--both", canScrollUp && canScrollDown)
+        el.classList.toggle("overflow-shadows--top-only", canScrollUp && !canScrollDown)
+        el.classList.toggle("overflow-shadows--bottom-only", !canScrollUp && canScrollDown)
+    }
+
+    el.addEventListener("scroll", handleScroll, {passive: true})
+    handleScroll()
+
+    const observer = new IntersectionObserver(handleScroll)
+    observer.observe(el) // el won't have scrollTop etc when hidden, so we need to recalculate when it's revealed
+
+    return () => {
+        el.removeEventListener("scroll", handleScroll)
+        observer.unobserve(el)
+    }
+}
+
 $(document)
     .ready(function () {
-
-        function dropdown_hover(e) {
-            var navbar = $(this)
-                .closest(".navbar");
-            if (navbar.length === 0 || navbar.find(".navbar-toggler")
-                .is(":hidden")) {
-                $(this)
-                    .children(".dropdown-toggle")
-                    .dropdown(e.type == "mouseenter" ? "show" : "hide");
-            }
-        }
-
         // load data for the menu
         $.ajax({
             url: $(document.body)
@@ -120,7 +129,7 @@ $(document)
                     }
                     attachTo.find(".dropdown-menu")
                         .remove();
-                    var menu = ['<ul class="dropdown-menu ms-n1 mt-n1">'];
+                    var menu = ['<ul class="dropdown-menu ms-n1 mt-n1 overflow-shadows">'];
                     var groups = data[parentId];
                     var gtype = "";
                     for (var i = 0; i < groups.length; ++i) {
@@ -139,11 +148,8 @@ $(document)
                         attachTo.closest(".dropdown-menu");
                     }
                     attachTo.append(menu.join(""));
-                }
 
-                if (!("ontouchstart" in document.documentElement)) {
-                    $("ul.nav li.dropdown, ul.nav li.dropend")
-                        .on("mouseenter mouseleave", dropdown_hover);
+                    attachTo.find(".overflow-shadows").each(function(){ overflowShadows(this)})
                 }
             }
         });
@@ -154,9 +160,10 @@ $(document)
 $(function () {
     const contentElement = $('#content.ietf-auto-nav');
     if (contentElement.length > 0) {
-        const heading_selector = "h2:not([style='display:none']):not(.navskip), h3:not([style='display:none']):not(.navskip), h4:not([style='display:none']):not(.navskip), h5:not([style='display:none']):not(.navskip), h6:not([style='display:none']):not(.navskip), .nav-heading:not([style='display:none']):not(.navskip)";
+        const heading_selector = ":is(h2, h3, h4, h5, h6, .h2, .h3, .h4, .h5, .h6, .nav-heading):not([style='display:none']):not(.navskip)";
         const headings = contentElement
-            .find(heading_selector);
+            .find(heading_selector)
+            .filter((i, el) => !el.closest(".navskip,.modal"));
 
         const contents = (headings.length > 0) &&
             ($(headings)
@@ -184,8 +191,8 @@ $(function () {
                 .attr("tabindex", 0)
                 .after($(`
                  <div class="col-xl-2 ps-0 small">
-                     <div id="righthand-panel" class="position-fixed col-xl-2 bg-light d-flex flex-column justify-content-between align-items-start">
-                         <nav id="righthand-nav" class="navbar navbar-light w-100 overflow-auto align-items-start flex-fill"></nav>
+                     <div id="righthand-panel" class="position-fixed col-xl-2 bg-light-subtle d-flex flex-column justify-content-between align-items-start">
+                         <nav id="righthand-nav" class="navbar w-100 overflow-auto align-items-start flex-fill"></nav>
                      </div>
                  </div>
                  `));
@@ -195,7 +202,7 @@ $(function () {
                 .children()
                 .last();
 
-            populate_nav(nav[0], heading_selector);
+            populate_nav(nav[0], headings.toArray());
 
             if (haveExtraNav) {
                 $('#righthand-panel').append('<div id="righthand-extra" class="w-100 py-3"></div>');
@@ -256,25 +263,26 @@ $(document)
 
 // Bootstrap doesn't load modals via href anymore, so let's do it ourselves.
 // See https://stackoverflow.com/a/48934494/2240756
+// Instead of attaching to the modal elements as in that example, though,
+// listen on document and filter with the .modal selector. This allows handling
+// of modals that are added dynamically (e.g., list.js apparently replaces DOM 
+// elements with identical copies, minus any attached listeners).
 $(document)
-    .ready(function () {
-        $('.modal')
-            .on('show.bs.modal', function (e) {
-                var button = $(e.relatedTarget);
-                if (!$(button)
-                    .attr("href")) {
-                    return;
-                }
-                var loc = $(button)
-                    .attr("href")
-                    .trim();
-                // load content from value of button href
-                if (loc !== undefined && loc !== "#") {
-                    $(this)
-                        .find('.modal-content')
-                        .load(loc);
-                }
-            });
+    .on('show.bs.modal', '.modal', function (e) {
+        var button = $(e.relatedTarget);
+        if (!$(button)
+            .attr("href")) {
+            return;
+        }
+        var loc = $(button)
+            .attr("href")
+            .trim();
+        // load content from value of button href
+        if (loc !== undefined && loc !== "#") {
+            $(this)
+                .find('.modal-content')
+                .load(loc);
+        }
     });
 
 // Handle history snippet expansion.

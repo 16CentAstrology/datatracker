@@ -1,9 +1,10 @@
-# Copyright The IETF Trust 2012-2022, All Rights Reserved
+# Copyright The IETF Trust 2012-2023, All Rights Reserved
 # -*- coding: utf-8 -*-
 
 
 import datetime
 import io
+import mock
 import random
 import shutil
 
@@ -23,6 +24,7 @@ from django.utils.encoding import force_str
 
 import debug                            # pyflakes:ignore
 
+from ietf.api.views import EmailIngestionError
 from ietf.dbtemplate.factories import DBTemplateFactory
 from ietf.dbtemplate.models import DBTemplate
 from ietf.doc.factories import DocEventFactory, WgDocumentAuthorFactory, \
@@ -36,15 +38,16 @@ from ietf.nomcom.test_data import nomcom_test_data, generate_cert, check_comment
                                   MEMBER_USER, SECRETARIAT_USER, EMAIL_DOMAIN, NOMCOM_YEAR
 from ietf.nomcom.models import NomineePosition, Position, Nominee, \
                                NomineePositionStateName, Feedback, FeedbackTypeName, \
-                               Nomination, FeedbackLastSeen, TopicFeedbackLastSeen, ReminderDates
-from ietf.nomcom.management.commands.send_reminders import Command, is_time_to_send
+                               Nomination, FeedbackLastSeen, TopicFeedbackLastSeen, ReminderDates, \
+                               NomCom
 from ietf.nomcom.factories import NomComFactory, FeedbackFactory, TopicFactory, \
                                   nomcom_kwargs_for_year, provide_private_key_to_test_client, \
                                   key
+from ietf.nomcom.tasks import send_nomcom_reminders_task
 from ietf.nomcom.utils import get_nomcom_by_year, make_nomineeposition, \
                               get_hash_nominee_position, is_eligible, list_eligible, \
-                              get_eligibility_date, suggest_affiliation, \
-                              decorate_volunteers_with_qualifications
+                              get_eligibility_date, suggest_affiliation, ingest_feedback_email, \
+                              decorate_volunteers_with_qualifications, send_reminders, _is_time_to_send_reminder
 from ietf.person.factories import PersonFactory, EmailFactory
 from ietf.person.models import Email, Person
 from ietf.stats.models import MeetingRegistration
@@ -98,6 +101,7 @@ class NomcomViewsTest(TestCase):
         self.private_nominate_newperson_url = reverse('ietf.nomcom.views.private_nominate_newperson', kwargs={'year': self.year})
         self.add_questionnaire_url = reverse('ietf.nomcom.views.private_questionnaire', kwargs={'year': self.year})
         self.private_feedback_url = reverse('ietf.nomcom.views.private_feedback', kwargs={'year': self.year})
+        self.private_feedback_email_url = reverse('ietf.nomcom.views.private_feedback_email', kwargs={'year': self.year})
         self.positions_url = reverse('ietf.nomcom.views.list_positions', kwargs={'year': self.year})        
         self.edit_position_url = reverse('ietf.nomcom.views.edit_position', kwargs={'year': self.year})
 
@@ -120,7 +124,7 @@ class NomcomViewsTest(TestCase):
         self.check_url_status(url, 200)
         self.client.logout()
         login_testing_unauthorized(self, MEMBER_USER, url)
-        return self.check_url_status(url, 200)
+        self.check_url_status(url, 200)
 
     def access_chair_url(self, url):
         login_testing_unauthorized(self, COMMUNITY_USER, url)
@@ -132,7 +136,7 @@ class NomcomViewsTest(TestCase):
         login_testing_unauthorized(self, COMMUNITY_USER, url)
         login_testing_unauthorized(self, CHAIR_USER, url)
         login_testing_unauthorized(self, SECRETARIAT_USER, url)
-        return self.check_url_status(url, 200)
+        self.check_url_status(url, 200)
 
     def test_private_index_view(self):
         """Verify private home view"""
@@ -597,6 +601,8 @@ class NomcomViewsTest(TestCase):
         self.nominate_view(public=True,confirmation=True)
 
         self.assertEqual(len(outbox), messages_before + 3)
+        self.assertEqual(Message.objects.count(), 2)
+        self.assertFalse(Message.objects.filter(subject="Nomination receipt").exists())
 
         self.assertEqual('IETF Nomination Information', outbox[-3]['Subject'])
         self.assertEqual(self.email_from, outbox[-3]['From'])
@@ -623,8 +629,7 @@ class NomcomViewsTest(TestCase):
 
     def test_private_nominate(self):
         self.access_member_url(self.private_nominate_url)
-        return self.nominate_view(public=False)
-        self.client.logout()
+        self.nominate_view(public=False)
 
     def test_public_nominate_newperson(self):
         login_testing_unauthorized(self, COMMUNITY_USER, self.public_nominate_url)
@@ -664,13 +669,13 @@ class NomcomViewsTest(TestCase):
 
     def test_private_nominate_newperson(self):
         self.access_member_url(self.private_nominate_url)
-        return self.nominate_newperson_view(public=False)
-        self.client.logout()
+        self.nominate_newperson_view(public=False, confirmation=True)
+        self.assertFalse(Message.objects.filter(subject="Nomination receipt").exists())
 
     def test_private_nominate_newperson_who_already_exists(self):
         EmailFactory(address='nominee@example.com')
         self.access_member_url(self.private_nominate_newperson_url)
-        return self.nominate_newperson_view(public=False)       
+        self.nominate_newperson_view(public=False)       
 
     def test_public_nominate_with_automatic_questionnaire(self):
         nomcom = get_nomcom_by_year(self.year)
@@ -686,20 +691,16 @@ class NomcomViewsTest(TestCase):
         self.assertIn('nominee@', outbox[1]['To'])
 
 
-    def nominate_view(self, *args, **kwargs):
-        public = kwargs.pop('public', True)
-        searched_email = kwargs.pop('searched_email', None)
-        nominee_email = kwargs.pop('nominee_email', 'nominee@example.com')
+    def nominate_view(self, public=True, searched_email=None,
+                      nominee_email='nominee@example.com',
+                      nominator_email=COMMUNITY_USER+EMAIL_DOMAIN,
+                      position='IAOC', confirmation=False):
+
         if not searched_email:
-            searched_email = Email.objects.filter(address=nominee_email).first() 
-            if not searched_email:
-                searched_email = EmailFactory(address=nominee_email, primary=True, origin='test')
+            searched_email = Email.objects.filter(address=nominee_email).first() or EmailFactory(address=nominee_email, primary=True, origin='test')
         if not searched_email.person:
             searched_email.person = PersonFactory()
             searched_email.save()
-        nominator_email = kwargs.pop('nominator_email', "%s%s" % (COMMUNITY_USER, EMAIL_DOMAIN))
-        position_name = kwargs.pop('position', 'IAOC')
-        confirmation = kwargs.pop('confirmation', False)
 
         if public:
             nominate_url = self.public_nominate_url
@@ -715,14 +716,15 @@ class NomcomViewsTest(TestCase):
 
         # save the cert file in tmp
         #nomcom.public_key.storage.location = tempfile.gettempdir()
-        nomcom.public_key.save('cert', File(io.open(self.cert_file.name, 'r')))
+        with io.open(self.cert_file.name, 'r') as fd:
+            nomcom.public_key.save('cert', File(fd))
 
         response = self.client.get(nominate_url)
         self.assertEqual(response.status_code, 200)
         q = PyQuery(response.content)
         self.assertEqual(len(q("#nominate-form")), 1)
 
-        position = Position.objects.get(name=position_name)
+        position = Position.objects.get(name=position)
         comment_text = 'Test nominate view. Comments with accents äöåÄÖÅ éáíóú âêîôû ü àèìòù.'
         candidate_phone = '123456'
 
@@ -760,12 +762,9 @@ class NomcomViewsTest(TestCase):
                                comments=feedback,
                                nominator_email="%s%s" % (COMMUNITY_USER, EMAIL_DOMAIN))
 
-    def nominate_newperson_view(self, *args, **kwargs):
-        public = kwargs.pop('public', True)
-        nominee_email = kwargs.pop('nominee_email', 'nominee@example.com')
-        nominator_email = kwargs.pop('nominator_email', "%s%s" % (COMMUNITY_USER, EMAIL_DOMAIN))
-        position_name = kwargs.pop('position', 'IAOC')
-        confirmation = kwargs.pop('confirmation', False)
+    def nominate_newperson_view(self, public=True, nominee_email='nominee@example.com',
+                                nominator_email=COMMUNITY_USER+EMAIL_DOMAIN,
+                                position='IAOC', confirmation=False):
 
         if public:
             nominate_url = self.public_nominate_newperson_url
@@ -781,14 +780,15 @@ class NomcomViewsTest(TestCase):
 
         # save the cert file in tmp
         #nomcom.public_key.storage.location = tempfile.gettempdir()
-        nomcom.public_key.save('cert', File(io.open(self.cert_file.name, 'r')))
+        with io.open(self.cert_file.name, 'r') as fd:
+            nomcom.public_key.save('cert', File(fd))
 
         response = self.client.get(nominate_url)
         self.assertEqual(response.status_code, 200)
         q = PyQuery(response.content)
         self.assertEqual(len(q("#nominate-form")), 1)
 
-        position = Position.objects.get(name=position_name)
+        position = Position.objects.get(name=position)
         candidate_email = nominee_email
         candidate_name = 'nominee'
         comment_text = 'Test nominate view. Comments with accents äöåÄÖÅ éáíóú âêîôû ü àèìòù.'
@@ -840,18 +840,15 @@ class NomcomViewsTest(TestCase):
 
     def test_add_questionnaire(self):
         self.access_chair_url(self.add_questionnaire_url)
-        return self.add_questionnaire()
-        self.client.logout()
+        self.add_questionnaire()
 
-    def add_questionnaire(self, *args, **kwargs):
-        public = kwargs.pop('public', False)
-        nominee_email = kwargs.pop('nominee_email', 'nominee@example.com')
-        nominator_email = kwargs.pop('nominator_email', "%s%s" % (COMMUNITY_USER, EMAIL_DOMAIN))
-        position_name = kwargs.pop('position', 'IAOC')
+    def add_questionnaire(self, public=False, nominee_email='nominee@example.com',
+                          nominator_email=COMMUNITY_USER+EMAIL_DOMAIN,
+                          position='IAOC'):
 
         self.nominate_view(public=public,
                            nominee_email=nominee_email,
-                           position=position_name,
+                           position=position,
                            nominator_email=nominator_email)
 
         response = self.client.get(self.add_questionnaire_url)
@@ -863,13 +860,14 @@ class NomcomViewsTest(TestCase):
 
         # save the cert file in tmp
         #nomcom.public_key.storage.location = tempfile.gettempdir()
-        nomcom.public_key.save('cert', File(io.open(self.cert_file.name, 'r')))
+        with io.open(self.cert_file.name, 'r') as fd:
+            nomcom.public_key.save('cert', File(fd))
 
         response = self.client.get(self.add_questionnaire_url)
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "questionnnaireform")
 
-        position = Position.objects.get(name=position_name)
+        position = Position.objects.get(name=position)
         nominee = Nominee.objects.get(email__address=nominee_email)
 
         comment_text = 'Test add questionnaire view. Comments with accents äöåÄÖÅ éáíóú âêîôû ü àèìòù.'
@@ -901,6 +899,8 @@ class NomcomViewsTest(TestCase):
         # We're interested in the confirmation receipt here
         self.assertEqual(len(outbox),3)
         self.assertEqual('NomCom comment confirmation', outbox[2]['Subject'])
+        self.assertEqual(Message.objects.count(), 2)
+        self.assertFalse(Message.objects.filter(subject="NomCom comment confirmation").exists())
         email_body = get_payload_text(outbox[2])
         self.assertIn(position, email_body)
         self.assertNotIn('$', email_body)
@@ -915,18 +915,15 @@ class NomcomViewsTest(TestCase):
 
     def test_private_feedback(self):
         self.access_member_url(self.private_feedback_url)
-        return self.feedback_view(public=False)
+        self.feedback_view(public=False)
 
-    def feedback_view(self, *args, **kwargs):
-        public = kwargs.pop('public', True)
-        nominee_email = kwargs.pop('nominee_email', 'nominee@example.com')
-        nominator_email = kwargs.pop('nominator_email', "%s%s" % (COMMUNITY_USER, EMAIL_DOMAIN))
-        position_name = kwargs.pop('position', 'IAOC')
-        confirmation = kwargs.pop('confirmation', False)
+    def feedback_view(self, public=True, nominee_email='nominee@example.com',
+                      nominator_email=COMMUNITY_USER+EMAIL_DOMAIN,
+                      position='IAOC', confirmation=False):
 
         self.nominate_view(public=public,
                            nominee_email=nominee_email,
-                           position=position_name,
+                           position=position,
                            nominator_email=nominator_email)
 
         feedback_url = self.public_feedback_url
@@ -942,13 +939,14 @@ class NomcomViewsTest(TestCase):
 
         # save the cert file in tmp
         #nomcom.public_key.storage.location = tempfile.gettempdir()
-        nomcom.public_key.save('cert', File(io.open(self.cert_file.name, 'r')))
+        with io.open(self.cert_file.name, 'r') as fd:
+            nomcom.public_key.save('cert', File(fd))
 
         response = self.client.get(feedback_url)
         self.assertEqual(response.status_code, 200)
         self.assertNotContains(response, "feedbackform")
 
-        position = Position.objects.get(name=position_name)
+        position = Position.objects.get(name=position)
         nominee = Nominee.objects.get(email__address=nominee_email)
 
         feedback_url += "?nominee=%d&position=%d" % (nominee.id, position.id)
@@ -964,7 +962,7 @@ class NomcomViewsTest(TestCase):
         comments = 'Test feedback view. Comments with accents äöåÄÖÅ éáíóú âêîôû ü àèìòù.'
 
         test_data = {'comment_text': comments,
-                     'position_name': position.name,
+                     'position': position.name,
                      'nominee_name': nominee.email.person.name,
                      'nominee_email': nominee.email.address,
                      'confirmation': confirmation}
@@ -1007,6 +1005,43 @@ class NomcomViewsTest(TestCase):
             nominee_position.save()
 
 
+    def test_private_feedback_email(self):
+        self.access_chair_url(self.private_feedback_email_url)
+
+        feedback_url = self.private_feedback_email_url
+        response = self.client.get(feedback_url)
+        self.assertEqual(response.status_code, 200)
+
+        nomcom = get_nomcom_by_year(self.year)
+        if not nomcom.public_key:
+            self.assertNotContains(response, "paste-email-feedback-form")
+
+        # save the cert file in tmp
+        with io.open(self.cert_file.name, 'r') as fd:
+            nomcom.public_key.save('cert', File(fd))
+
+        response = self.client.get(feedback_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "paste-email-feedback-form")
+
+        headers = \
+            "From: Zaphod Beeblebrox <president@galaxy>\n" \
+            "Subject: Ford Prefect\n\n"
+        body = \
+            "Hey, you sass that hoopy Ford Prefect?\n" \
+            "There's a frood who really knows where his towel is.\n"
+
+        test_data = {'email_text': body}
+        response = self.client.post(feedback_url, test_data)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'Missing email headers')
+
+        test_data = {'email_text': headers + body}
+        response = self.client.post(feedback_url, test_data)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'The feedback email has been registered.')
+
+
 class NomineePositionStateSaveTest(TestCase):
     """Tests for the NomineePosition save override method"""
 
@@ -1035,8 +1070,8 @@ class NomineePositionStateSaveTest(TestCase):
                                                           state=NomineePositionStateName.objects.get(slug='accepted'))
         self.assertEqual(nominee_position.state.slug, 'accepted')
 
-    def test_nomine_position_unique(self):
-        """Verify nomine and position are unique together"""
+    def test_nominee_position_unique(self):
+        """Verify nominee and position are unique together"""
         position = Position.objects.get(name='OAM')
         NomineePosition.objects.create(position=position,
                                        nominee=self.nominee)
@@ -1066,7 +1101,8 @@ class FeedbackTest(TestCase):
 
         # save the cert file in tmp
         #nomcom.public_key.storage.location = tempfile.gettempdir()
-        nomcom.public_key.save('cert', File(io.open(self.cert_file.name, 'r')))
+        with io.open(self.cert_file.name, 'r') as fd:
+            nomcom.public_key.save('cert', File(fd))
 
         comment_text = 'Plain text. Comments with accents äöåÄÖÅ éáíóú âêîôû ü àèìòù.'
         comments = nomcom.encrypt(comment_text)
@@ -1080,6 +1116,47 @@ class FeedbackTest(TestCase):
         self.assertNotEqual(feedback.comments, comment_text)
         self.assertEqual(check_comments(feedback.comments, comment_text, self.privatekey_file), True)
 
+    @mock.patch("ietf.nomcom.utils.create_feedback_email")
+    def test_ingest_feedback_email(self, mock_create_feedback_email):
+        message = b"This is nomcom feedback"
+        no_nomcom_year = date_today().year + 10  # a guess at a year with no nomcoms
+        while NomCom.objects.filter(group__acronym__icontains=no_nomcom_year).exists():
+            no_nomcom_year += 1
+        inactive_nomcom = NomComFactory(group__state_id="conclude", group__acronym=f"nomcom{no_nomcom_year + 1}")
+
+        # cases where the nomcom does not exist, so admins are notified
+        for bad_year in (no_nomcom_year, inactive_nomcom.year()):
+            with self.assertRaises(EmailIngestionError) as context:
+                ingest_feedback_email(message, bad_year)
+            self.assertIn("does not exist", context.exception.msg)
+            self.assertIsNotNone(context.exception.email_body)  # error message to be sent
+            self.assertIsNone(context.exception.email_recipients)  # default recipients (i.e., admin)
+            self.assertIsNone(context.exception.email_original_message)  # no original message
+            self.assertFalse(context.exception.email_attach_traceback)  # no traceback
+            self.assertFalse(mock_create_feedback_email.called)
+        
+        # nomcom exists but an error occurs, so feedback goes to the nomcom chair
+        active_nomcom = NomComFactory(group__acronym=f"nomcom{no_nomcom_year + 2}")
+        mock_create_feedback_email.side_effect = ValueError("ouch!")
+        with self.assertRaises(EmailIngestionError) as context:
+            ingest_feedback_email(message, active_nomcom.year())
+        self.assertIn(f"Error ingesting nomcom {active_nomcom.year()}", context.exception.msg)
+        self.assertIsNotNone(context.exception.email_body)  # error message to be sent
+        self.assertEqual(context.exception.email_recipients, active_nomcom.chair_emails())
+        self.assertEqual(context.exception.email_original_message, message)
+        self.assertFalse(context.exception.email_attach_traceback)  # no traceback
+        self.assertTrue(mock_create_feedback_email.called)
+        self.assertEqual(mock_create_feedback_email.call_args, mock.call(active_nomcom, message))
+        mock_create_feedback_email.reset_mock()
+
+        # and, finally, success
+        mock_create_feedback_email.side_effect = None
+        mock_create_feedback_email.return_value = FeedbackFactory(author="someone@example.com")
+        ingest_feedback_email(message, active_nomcom.year())
+        self.assertTrue(mock_create_feedback_email.called)
+        self.assertEqual(mock_create_feedback_email.call_args, mock.call(active_nomcom, message))
+
+
 class ReminderTest(TestCase):
 
     def setUp(self):
@@ -1089,7 +1166,8 @@ class ReminderTest(TestCase):
         self.nomcom = get_nomcom_by_year(NOMCOM_YEAR)
         self.cert_file, self.privatekey_file = get_cert_files()
         #self.nomcom.public_key.storage.location = tempfile.gettempdir()
-        self.nomcom.public_key.save('cert', File(io.open(self.cert_file.name, 'r')))
+        with io.open(self.cert_file.name, 'r') as fd:
+            self.nomcom.public_key.save('cert', File(fd))
 
         gen = Position.objects.get(nomcom=self.nomcom,name='GEN')
         rai = Position.objects.get(nomcom=self.nomcom,name='RAI')
@@ -1121,7 +1199,7 @@ class ReminderTest(TestCase):
         feedback = Feedback.objects.create(nomcom=self.nomcom,
                                            comments=self.nomcom.encrypt('some non-empty comments'),
                                            type=FeedbackTypeName.objects.get(slug='questio'),
-                                           user=User.objects.get(username=CHAIR_USER))
+                                           person=User.objects.get(username=CHAIR_USER).person)
         feedback.positions.add(gen)
         feedback.nominees.add(n)
 
@@ -1129,36 +1207,41 @@ class ReminderTest(TestCase):
         teardown_test_public_keys_dir(self)
         super().tearDown()
 
-    def test_is_time_to_send(self):
+    def test_is_time_to_send_reminder(self):
         self.nomcom.reminder_interval = 4
         today = date_today()
-        self.assertTrue(is_time_to_send(self.nomcom,today+datetime.timedelta(days=4),today))
+        self.assertTrue(
+            _is_time_to_send_reminder(self.nomcom, today + datetime.timedelta(days=4), today)
+        )
         for delta in range(4):
-            self.assertFalse(is_time_to_send(self.nomcom,today+datetime.timedelta(days=delta),today))
+            self.assertFalse(
+                _is_time_to_send_reminder(
+                    self.nomcom, today + datetime.timedelta(days=delta), today
+                )
+            )
         self.nomcom.reminder_interval = None
-        self.assertFalse(is_time_to_send(self.nomcom,today,today))
+        self.assertFalse(_is_time_to_send_reminder(self.nomcom, today, today))
         self.nomcom.reminderdates_set.create(date=today)
-        self.assertTrue(is_time_to_send(self.nomcom,today,today))
+        self.assertTrue(_is_time_to_send_reminder(self.nomcom, today, today))
 
-    def test_command(self):
-        c = Command()
-        messages_before=len(outbox)
+    def test_send_reminders(self):
+        messages_before = len(outbox)
         self.nomcom.reminder_interval = 3
         self.nomcom.save()
-        c.handle(None,None)
+        send_reminders()
         self.assertEqual(len(outbox), messages_before + 2)
         self.assertIn('nominee1@example.org', outbox[-1]['To'])
         self.assertIn('please complete', outbox[-1]['Subject'])
         self.assertIn('nominee1@example.org', outbox[-2]['To'])
         self.assertIn('please accept', outbox[-2]['Subject'])
-        messages_before=len(outbox)
+        messages_before = len(outbox)
         self.nomcom.reminder_interval = 4
         self.nomcom.save()
-        c.handle(None,None)
+        send_reminders()
         self.assertEqual(len(outbox), messages_before + 1)
         self.assertIn('nominee2@example.org', outbox[-1]['To'])
         self.assertIn('please accept', outbox[-1]['Subject'])
-     
+
     def test_remind_accept_view(self):
         url = reverse('ietf.nomcom.views.send_reminder_mail', kwargs={'year': NOMCOM_YEAR,'type':'accept'})
         login_testing_unauthorized(self, CHAIR_USER, url)
@@ -1280,6 +1363,36 @@ class InactiveNomcomTests(TestCase):
         q = PyQuery(response.content)
         self.assertIn('not active', q('.alert-warning').text() )
 
+    def test_filter_nominees(self):
+        url = reverse(
+            "ietf.nomcom.views.private_index", kwargs={"year": self.nc.year()}
+        )
+        login_testing_unauthorized(self, self.chair.user.username, url)
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+
+        states = list(NomineePositionStateName.objects.values_list("slug", flat=True))
+        states += ["not-declined", "questionnaire"]
+        for state in states:
+            response = self.client.get(url, {"state": state})
+            self.assertEqual(response.status_code, 200)
+            q = PyQuery(response.content)
+            nps = []
+            if state == "not-declined":
+                nps = NomineePosition.objects.exclude(state__slug="declined")
+            elif state == "questionnaire":
+                nps = [
+                    np
+                    for np in NomineePosition.objects.not_duplicated()
+                    if np.questionnaires
+                ]
+            else:
+                nps = NomineePosition.objects.filter(state__slug=state)
+            # nomination state is in third table column
+            self.assertEqual(
+                len(nps), len(q("#nominee-position-table td:nth-child(3)"))
+            )
+
     def test_email_pasting_closed(self):
         url = reverse('ietf.nomcom.views.private_feedback_email', kwargs={'year':self.nc.year()})
         login_testing_unauthorized(self, self.chair.user.username, url)
@@ -1376,6 +1489,35 @@ class InactiveNomcomTests(TestCase):
         q = PyQuery(response.content)
         self.assertFalse( q('#templateform') )
 
+class FeedbackIndexTests(TestCase):
+
+    def setUp(self):
+        super().setUp()
+        setup_test_public_keys_dir(self)
+        self.nc = NomComFactory.create(**nomcom_kwargs_for_year())
+        self.author = PersonFactory.create().email_set.first().address
+        self.member = self.nc.group.role_set.filter(name='member').first().person
+        self.nominee = self.nc.nominee_set.order_by('pk').first()
+        self.position = self.nc.position_set.first()
+        for type_id in ['comment','nomina','questio']:
+            f = FeedbackFactory.create(author=self.author,nomcom=self.nc,type_id=type_id)
+            f.positions.add(self.position)
+            f.nominees.add(self.nominee)
+
+    def tearDown(self):
+        teardown_test_public_keys_dir(self)
+        super().tearDown()
+
+    def test_feedback_index_totals(self):
+        url = reverse('ietf.nomcom.views.view_feedback',kwargs={'year':self.nc.year()})
+        login_testing_unauthorized(self, self.member.user.username, url)
+        provide_private_key_to_test_client(self)
+        response = self.client.get(url)
+        self.assertEqual(response.status_code,200)
+        q = PyQuery(response.content)
+        r = q('tfoot').eq(0).find('td').contents()
+        self.assertEqual([a.strip() for a in r], ['1', '1', '1', '0'])
+
 class FeedbackLastSeenTests(TestCase):
 
     def setUp(self):
@@ -1409,7 +1551,7 @@ class FeedbackLastSeenTests(TestCase):
         response = self.client.get(url)
         self.assertEqual(response.status_code,200)
         q = PyQuery(response.content)
-        self.assertEqual( len(q('.bg-success')), 4 )
+        self.assertEqual( len(q('.text-bg-success')), 4 )
 
         f = self.nc.feedback_set.first()
         f.time = self.hour_ago
@@ -1419,20 +1561,20 @@ class FeedbackLastSeenTests(TestCase):
         response = self.client.get(url)
         self.assertEqual(response.status_code,200)
         q = PyQuery(response.content)
-        self.assertEqual( len(q('.bg-success')), 3 )
+        self.assertEqual( len(q('.text-bg-success')), 3 )
 
         FeedbackLastSeen.objects.update(time=self.second_from_now)
         response = self.client.get(url)
         self.assertEqual(response.status_code,200)
         q = PyQuery(response.content)
-        self.assertEqual( len(q('.bg-success')), 1 )
+        self.assertEqual( len(q('.text-bg-success')), 1 )
 
         TopicFeedbackLastSeen.objects.create(reviewer=self.member,topic=self.topic)
         TopicFeedbackLastSeen.objects.update(time=self.second_from_now)
         response = self.client.get(url)
         self.assertEqual(response.status_code,200)
         q = PyQuery(response.content)
-        self.assertEqual( len(q('.bg-success')), 0 )
+        self.assertEqual( len(q('.text-bg-success')), 0 )
 
     def test_feedback_nominee_badges(self):
         url = reverse('ietf.nomcom.views.view_feedback_nominee', kwargs={'year':self.nc.year(), 'nominee_id':self.nominee.id})
@@ -1441,7 +1583,7 @@ class FeedbackLastSeenTests(TestCase):
         response = self.client.get(url)
         self.assertEqual(response.status_code,200)
         q = PyQuery(response.content)
-        self.assertEqual( len(q('.bg-success')), 3 )
+        self.assertEqual( len(q('.text-bg-success')), 3 )
 
         f = self.nc.feedback_set.first()
         f.time = self.hour_ago
@@ -1451,13 +1593,13 @@ class FeedbackLastSeenTests(TestCase):
         response = self.client.get(url)
         self.assertEqual(response.status_code,200)
         q = PyQuery(response.content)
-        self.assertEqual( len(q('.bg-success')), 2 )
+        self.assertEqual( len(q('.text-bg-success')), 2 )
 
         FeedbackLastSeen.objects.update(time=self.second_from_now)
         response = self.client.get(url)
         self.assertEqual(response.status_code,200)
         q = PyQuery(response.content)
-        self.assertEqual( len(q('.bg-success')), 0 )
+        self.assertEqual( len(q('.text-bg-success')), 0 )
 
     def test_feedback_topic_badges(self):
         url = reverse('ietf.nomcom.views.view_feedback_topic', kwargs={'year':self.nc.year(), 'topic_id':self.topic.id})
@@ -1466,7 +1608,7 @@ class FeedbackLastSeenTests(TestCase):
         response = self.client.get(url)
         self.assertEqual(response.status_code,200)
         q = PyQuery(response.content)
-        self.assertEqual( len(q('.bg-success')), 1 )
+        self.assertEqual( len(q('.text-bg-success')), 1 )
 
         f = self.topic.feedback_set.first()
         f.time = self.hour_ago
@@ -1476,20 +1618,23 @@ class FeedbackLastSeenTests(TestCase):
         response = self.client.get(url)
         self.assertEqual(response.status_code,200)
         q = PyQuery(response.content)
-        self.assertEqual( len(q('.bg-success')), 0 )
+        self.assertEqual( len(q('.text-bg-success')), 0 )
 
         TopicFeedbackLastSeen.objects.update(time=self.second_from_now)
         response = self.client.get(url)
         self.assertEqual(response.status_code,200)
         q = PyQuery(response.content)
-        self.assertEqual( len(q('.bg-success')), 0 )
+        self.assertEqual( len(q('.text-bg-success')), 0 )
 
 class NewActiveNomComTests(TestCase):
 
     def setUp(self):
         super().setUp()
         setup_test_public_keys_dir(self)
-        self.nc = NomComFactory.create(**nomcom_kwargs_for_year(year=random.randint(1992,2100)))
+        # Pin nomcom years to be after 2008 or later so that ietf.nomcom.utils.list_eligible can 
+        # return something other than empty. Note that anything after 2022 is suspect, and that
+        # we should revisit this when implementing RFC 9389.
+        self.nc = NomComFactory.create(**nomcom_kwargs_for_year(year=random.randint(2008,2100)))
         self.chair = self.nc.group.role_set.filter(name='chair').first().person
         self.saved_days_to_expire_nomination_link = settings.DAYS_TO_EXPIRE_NOMINATION_LINK
 
@@ -1568,6 +1713,16 @@ class NewActiveNomComTests(TestCase):
         login_testing_unauthorized(self,self.chair.user.username,url)
         response = self.client.get(url)
         self.assertEqual(response.status_code,200)
+        # Check that we get an error if there's an encoding problem talking to openssl
+        # "\xc3\x28" is an invalid utf8 string
+        with mock.patch("ietf.nomcom.utils.pipe", return_value=(0, b"\xc3\x28", None)):
+            response = self.client.post(url, {'key': force_str(key)})
+        self.assertFormError(
+            response.context["form"],
+            None,
+            "An internal error occurred while adding your private key to your session."
+            f"Please contact the secretariat for assistance ({settings.SECRETARIAT_SUPPORT_EMAIL})",
+        )
         response = self.client.post(url,{'key': force_str(key)})
         self.assertEqual(response.status_code,302)
 
@@ -1929,7 +2084,7 @@ Junk body for testing
         for number in range(meeting_start, meeting_start+8):
             m = MeetingFactory.create(type_id='ietf', number=number)
             for p in people:
-                m.meetingregistration_set.create(person=p)
+                m.meetingregistration_set.create(person=p, reg_type="onsite", checkedin=True, attended=True)
         for p in people:
             self.nc.volunteer_set.create(person=p,affiliation='something')
         for view in ('public_volunteers','private_volunteers'):
@@ -1947,6 +2102,14 @@ Junk body for testing
         login_testing_unauthorized(self,self.chair.user.username,url)
         response = self.client.get(url)
         self.assertContains(response,people[-1].email(),status_code=200)
+        unqualified_person = PersonFactory()
+        url = reverse('ietf.nomcom.views.qualified_volunteer_list_for_announcement',kwargs={'year':year})
+        self.client.logout()
+        login_testing_unauthorized(self,self.chair.user.username,url)
+        response = self.client.get(url)
+        self.assertContains(response, people[-1].plain_name(), status_code=200)
+        self.assertNotContains(response, unqualified_person.plain_name())
+
 
 
 
@@ -1973,10 +2136,10 @@ class NoPublicKeyTests(TestCase):
         response = self.client.get(url)
         self.assertEqual(response.status_code,200)
         q=PyQuery(response.content)
-        text_bits = [x.xpath('./text()') for x in q('.alert-warning')]
+        text_bits = [x.xpath('.//text()') for x in q('.alert-warning')]
         flat_text_bits = [item for sublist in text_bits for item in sublist]
         self.assertTrue(any(['not yet' in y for y in flat_text_bits]))
-        self.assertEqual(bool(q('form:not(.navbar-form)')),expected_form)
+        self.assertEqual(bool(q('#content form:not(.navbar-form)')),expected_form)
         self.client.logout()
 
     def test_not_yet(self):
@@ -2065,7 +2228,7 @@ class AcceptingTests(TestCase):
         self.assertIn('not currently accepting feedback', unicontent(response))
 
         test_data = {'comment_text': 'junk',
-                     'position_name': pos.name,
+                     'position': pos.name,
                      'nominee_name': pos.nominee_set.first().email.person.name,
                      'nominee_email': pos.nominee_set.first().email.address,
                      'confirmation': False,
@@ -2292,6 +2455,7 @@ class rfc8713EligibilityTests(TestCase):
         self.eligible_people = list()
         self.ineligible_people = list()
 
+        # Section 4.14 qualification criteria
         for combo_len in range(0,6):
             for combo in combinations(meetings,combo_len):
                 p = PersonFactory()
@@ -2301,6 +2465,18 @@ class rfc8713EligibilityTests(TestCase):
                     self.ineligible_people.append(p)
                 else:
                     self.eligible_people.append(p)
+
+        # Section 4.15 disqualification criteria
+        def ineligible_person_with_role(**kwargs):
+            p = RoleFactory(**kwargs).person
+            for m in meetings:
+                MeetingRegistrationFactory(person=p, meeting=m, attended=True)
+            self.ineligible_people.append(p)
+        for group in ['isocbot', 'ietf-trust', 'llc-board', 'iab']:
+            for role in ['member', 'chair']:
+                ineligible_person_with_role(group__acronym=group, name_id=role)
+        ineligible_person_with_role(group__type_id='area', group__state_id='active',name_id='ad')
+        ineligible_person_with_role(group=self.nomcom.group, name_id='chair')
 
         # No-one is eligible for the other_nomcom
         self.other_nomcom = NomComFactory(group__acronym='nomcom2018',first_call_for_volunteers=datetime.date(2018,5,1))
@@ -2582,7 +2758,7 @@ class rfc8989EligibilityTests(TestCase):
             self.assertEqual(set(list_eligible(nomcom=nomcom)),set(eligible))
             Person.objects.filter(pk__in=[p.pk for p in eligible.union(ineligible)]).delete()
 
-class rfc8989bisEligibilityTests(TestCase):
+class rfc9389EligibilityTests(TestCase):
 
     def setUp(self):
         super().setUp()
@@ -2634,6 +2810,7 @@ class rfc8989bisEligibilityTests(TestCase):
 
         for person in ineligible_people:
             self.assertFalse(is_eligible(person,self.nomcom))
+
 
 class VolunteerTests(TestCase):
 
@@ -2766,3 +2943,120 @@ class VolunteerDecoratorUnitTests(TestCase):
                 self.assertEqual(v.qualifications,'path_2')
             if v.person == author_person:
                 self.assertEqual(v.qualifications,'path_3')
+
+class ReclassifyFeedbackTests(TestCase):
+    """Tests for feedback reclassification"""
+
+    def setUp(self):
+        super().setUp()
+        setup_test_public_keys_dir(self)
+        self.nc = NomComFactory.create(**nomcom_kwargs_for_year())
+        self.chair = self.nc.group.role_set.filter(name='chair').first().person
+        self.member = self.nc.group.role_set.filter(name='member').first().person
+        self.nominee = self.nc.nominee_set.order_by('pk').first()
+        self.position = self.nc.position_set.first()
+        self.topic = self.nc.topic_set.first()
+
+    def tearDown(self):
+        teardown_test_public_keys_dir(self)
+        super().tearDown()
+
+    def test_download_feedback_nominee(self):
+        # not really a reclassification test, but in closely adjacent code
+        fb = FeedbackFactory.create(nomcom=self.nc,type_id='questio')
+        fb.positions.add(self.position)
+        fb.nominees.add(self.nominee)
+        fb.save()
+        self.assertEqual(Feedback.objects.questionnaires().count(), 1)
+
+        url = reverse('ietf.nomcom.views.view_feedback_nominee', kwargs={'year':self.nc.year(), 'nominee_id':self.nominee.id})
+        login_testing_unauthorized(self,self.member.user.username,url)
+        provide_private_key_to_test_client(self)
+        response = self.client.post(url, {'feedback_id': fb.id, 'submit': 'download'})
+        self.assertEqual(response.status_code, 403)
+
+        self.client.logout()
+        self.client.login(username=self.chair.user.username, password=self.chair.user.username + "+password")
+        provide_private_key_to_test_client(self)
+
+        response = self.client.post(url, {'feedback_id': fb.id, 'submit': 'download'})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('questionnaire-', response['Content-Disposition'])
+
+    def test_reclassify_feedback_nominee(self):
+        fb = FeedbackFactory.create(nomcom=self.nc,type_id='comment')
+        fb.positions.add(self.position)
+        fb.nominees.add(self.nominee)
+        fb.save()
+        self.assertEqual(Feedback.objects.comments().count(), 1)
+
+        url = reverse('ietf.nomcom.views.view_feedback_nominee', kwargs={'year':self.nc.year(), 'nominee_id':self.nominee.id})
+        login_testing_unauthorized(self,self.member.user.username,url)
+        provide_private_key_to_test_client(self)
+        response = self.client.post(url, {'feedback_id': fb.id, 'type': 'obe', 'submit': 'reclassify'})
+        self.assertEqual(response.status_code, 403)
+
+        self.client.logout()
+        self.client.login(username=self.chair.user.username, password=self.chair.user.username + "+password")
+        provide_private_key_to_test_client(self)
+
+        response = self.client.post(url, {'feedback_id': fb.id, 'type': 'obe', 'submit': 'reclassify'})
+        self.assertEqual(response.status_code, 200)
+
+        fb = Feedback.objects.get(id=fb.id)
+        self.assertEqual(fb.type_id,'obe')
+        self.assertEqual(Feedback.objects.comments().count(), 0)
+        self.assertEqual(Feedback.objects.filter(type='obe').count(), 1)
+
+    def test_reclassify_feedback_topic(self):
+        fb = FeedbackFactory.create(nomcom=self.nc,type_id='comment')
+        fb.topics.add(self.topic)
+        fb.save()
+        self.assertEqual(Feedback.objects.comments().count(), 1)
+
+        url = reverse('ietf.nomcom.views.view_feedback_topic', kwargs={'year':self.nc.year(), 'topic_id':self.topic.id})
+        login_testing_unauthorized(self,self.member.user.username,url)
+        provide_private_key_to_test_client(self)
+        response = self.client.post(url, {'feedback_id': fb.id, 'type': 'unclassified'})
+        self.assertEqual(response.status_code, 403)
+
+        self.client.logout()
+        self.client.login(username=self.chair.user.username, password=self.chair.user.username + "+password")
+        provide_private_key_to_test_client(self)
+
+        response = self.client.post(url, {'feedback_id': fb.id, 'type': 'unclassified'})
+        self.assertEqual(response.status_code, 200)
+
+        fb = Feedback.objects.get(id=fb.id)
+        self.assertEqual(fb.type_id,None)
+        self.assertEqual(Feedback.objects.comments().count(), 0)
+        self.assertEqual(Feedback.objects.filter(type=None).count(), 1)
+
+    def test_reclassify_feedback_unrelated(self):
+        fb = FeedbackFactory(nomcom=self.nc, type_id='read')
+        self.assertEqual(Feedback.objects.filter(type='read').count(), 1)
+
+        url = reverse('ietf.nomcom.views.view_feedback_unrelated', kwargs={'year':self.nc.year()})
+        login_testing_unauthorized(self,self.member.user.username,url)
+        provide_private_key_to_test_client(self)
+        response = self.client.post(url, {'feedback_id': fb.id, 'type': 'junk'})
+        self.assertEqual(response.status_code, 403)
+
+        self.client.logout()
+        self.client.login(username=self.chair.user.username, password=self.chair.user.username + "+password")
+        provide_private_key_to_test_client(self)
+
+        response = self.client.post(url, {'feedback_id': fb.id, 'type': 'junk'})
+        self.assertEqual(response.status_code, 200)
+
+        fb = Feedback.objects.get(id=fb.id)
+        self.assertEqual(fb.type_id, 'junk')
+        self.assertEqual(Feedback.objects.filter(type='read').count(), 0)
+        self.assertEqual(Feedback.objects.filter(type='junk').count(), 1)
+
+
+class TaskTests(TestCase):
+    @mock.patch("ietf.nomcom.tasks.send_reminders")
+    def test_send_nomcom_reminders_task(self, mock_send):
+        send_nomcom_reminders_task()
+        self.assertEqual(mock_send.call_count, 1)

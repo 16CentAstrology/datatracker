@@ -41,7 +41,7 @@
                     </a>
                 {% endif %}
                 {# Notes #}
-                {% if use_notes %}
+                {% if meeting.uses_notes %}
                     <a class="btn btn-outline-primary"
                         role="button"
                         href="{{ session.notes_url }}"
@@ -51,7 +51,7 @@
                     </a>
                 {% endif %}
                 {# show stream buttons up till end of session, then show archive buttons #}
-                {% if now < timeslot.end_time %}
+                {% if timezone_now < timeslot.end_time %}
                     {# chat #}
                     <a class="btn btn-outline-primary"
                         role="button"
@@ -61,30 +61,30 @@
                         <i class="bi bi-chat"></i>
                     </a>
                     {# Video stream (meetecho) #}
-                    {% if timeslot.location.video_stream_url %}
+                    {% if session.video_stream_url %}
                         <a class="btn btn-outline-primary"
                             role="button"
-                            href="{{ timeslot.location.video_stream_url|format:session }}"
+                            href="{{ session.video_stream_url }}"
                             aria-label="Video stream"
                             title="Video stream">
                             <i class="bi bi-camera-video"></i>
                         </a>
                     {% endif %}
                     {# Onsite tool (meetecho_onsite) #}
-                    {% if timeslot.location.onsite_tool_url %}
+                    {% if session.onsite_tool_url %}
                         <a class="btn btn-outline-primary"
                             role="button"
-                            href="{{ timeslot.location.onsite_tool_url|format:session }}"
+                            href="{{ session.onsite_tool_url }}"
                             aria-label="Onsite tool"
                             title="Onsite tool">
                             <i class="bi bi-phone"></i>
                         </a>
                     {% endif %}
                     {# Audio stream #}
-                    {% if timeslot.location.audio_stream_url %}
+                    {% if session.audio_stream_url %}
                         <a class="btn btn-outline-primary"
                             role="button"
-                            href="{{ timeslot.location.audio_stream_url|format:session }}"
+                            href="{{ session.audio_stream_url }}"
                             aria-label="Audio stream"
                             title="Audio stream">
                             <i class="bi bi-headphones"></i>
@@ -126,7 +126,7 @@
                     </a>
                 {% else %}
                     {# chat logs #}
-                    {% if meeting.number|add:"0" >= 60 %}
+                    {% if meeting.has_chat_logs %}
                         <a class="btn btn-outline-primary"
                             role="button"
                             href="{{session.chat_archive_url}}"
@@ -136,7 +136,7 @@
                         </a>
                     {% endif %}
                     {# Recordings #}
-                    {% if meeting.number|add:"0" >= 80 %}
+		    {% if meeting.has_recordings %}
                         {% with session.recordings as recordings %}
                             {% if recordings %}
                                 {# There's no guaranteed order, so this is a bit messy: #}
@@ -178,10 +178,10 @@
                                 {% endfor %}
                             {% endif %}
                         {% endwith %}
-                        {% if timeslot.location.video_stream_url %}
+                        {% if session.video_stream_url %}
                             <a class="btn btn-outline-primary"
                                 role="button"
-                                href="https://www.meetecho.com/ietf{{ meeting.number }}/recordings#{{ acronym.upper }}"
+                                href="{{ session.session_recording_url }}"
                                 aria-label="Session recording"
                                 title="Session recording">
                                 <i class="bi bi-file-slides"></i>
@@ -229,7 +229,7 @@
                         </li>
                     {% endif %}
                     {# Notes #}
-                    {% if use_notes %}
+                    {% if meeting.uses_notes %}
                         <li>
                             <a class="dropdown-item" href="{{ session.notes_url }}">
                                 <i class="bi bi-journal-text"></i> Notepad for note-takers
@@ -237,7 +237,7 @@
                         </li>
                     {% endif %}
                     {# show stream buttons up till end of session, then show archive buttons #}
-                    {% if now < timeslot.end_time %}
+                    {% if timezone_now < timeslot.end_time %}
                         {# chat #}
                         <li>
                             <a class="dropdown-item"
@@ -246,28 +246,28 @@
                             </a>
                         </li>
                         {# Video stream (meetecho) #}
-                        {% if timeslot.location.video_stream_url %}
+                        {% if session.video_stream_url %}
                             <li>
                                 <a class="dropdown-item"
-                                    href="{{ timeslot.location.video_stream_url|format:session }}">
+                                    href="{{ session.video_stream_url }}">
                                     <i class="bi bi-camera-video"></i> Video stream
                                 </a>
                             </li>
                         {% endif %}
                         {# Onsite tool (meetecho_onsite) #}
-                        {% if timeslot.location.onsite_tool_url %}
+                        {% if session.onsite_tool_url %}
                         <li>
                             <a class="dropdown-item"
-                                href="{{ timeslot.location.onsite_tool_url|format:session }}">
+                                href="{{ session.onsite_tool_url }}">
                                 <i class="bi bi-phone"></i> Onsite tool
                             </a>
                         </li>
                         {% endif %}
                         {# Audio stream #}
-                        {% if timeslot.location.audio_stream_url %}
+                        {% if session.audio_stream_url %}
                             <li>
                                 <a class="dropdown-item"
-                                    href="{{ timeslot.location.audio_stream_url|format:session }}">
+                                    href="{{ session.audio_stream_url }}">
                                     <i class="bi bi-headphones"></i> Audio stream
                                 </a>
                             </li>
@@ -303,7 +303,7 @@
                         </li>
                     {% else %}
                         {# chat logs #}
-                        {% if meeting.number|add:"0" >= 60 %}
+			{% if meeting.has_chat_logs %}
                             <li>
                                 <a class="dropdown-item"
                                     href="session.chat_room_url">
@@ -312,7 +312,7 @@
                             </li>
                         {% endif %}
                         {# Recordings #}
-                        {% if meeting.number|add:"0" >= 80 %}
+                        {% if meeting.has_recordings %}
                             {% with session.recordings as recordings %}
                                 {% if recordings %}
                                     {# There's no guaranteed order, so this is a bit messy: #}
@@ -348,10 +348,10 @@
                                     {% endfor %}
                                 {% endif %}
                             {% endwith %}
-                            {% if timeslot.location.video_stream_url %}
+                            {% if session.video_stream_url %}
                                 <li>
                                     <a class="dropdown-item"
-                                        href="https://www.meetecho.com/ietf{{ meeting.number }}/recordings#{{ acronym.upper }}">
+                                        href="{{ session.session_recording_url }}">
                                         <i class="bi bi-file-slides"></i> Session recording
                                     </a>
                                 </li>

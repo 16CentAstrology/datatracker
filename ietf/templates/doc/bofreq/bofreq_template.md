@@ -8,7 +8,6 @@ Fill in the details below. Keep items in the order they appear here.
 - Status: (not) WG Forming
 - Responsible AD: name
 - BOF proponents: name <email>, name <email> (1-3 people - who are requesting and coordinating discussion for proposal) 
-- BOF chairs: TBD
 - Number of people expected to attend: 100
 - Length of session (1 or 2 hours): 2 hours
 - Conflicts (whole Areas and/or WGs)
@@ -25,13 +24,13 @@ To allow evaluation of your proposal, please include the following items:
 - Open source projects (if any) implementing this work:
 
 ## Agenda
-   - Items, drafts, speakers, timing
+   - Items, Internet-Drafts, speakers, timing
    - Or a URL
 
 ## Links to the mailing list, draft charter if any, relevant Internet-Drafts, etc.
    - Mailing List: https://www.ietf.org/mailman/listinfo/example
    - Draft charter: {{ settings.IDTRACKER_BASE_URL }}{% url 'ietf.doc.views_doc.document_main' name='charter-ietf-EXAMPLE' %}
-   - Relevant drafts:
+   - Relevant Internet-Drafts:
       - Use Cases:
          - {{ settings.IDTRACKER_BASE_URL }}{% url 'ietf.doc.views_doc.document_main' name='draft-blah-uses' %}
       - Solutions

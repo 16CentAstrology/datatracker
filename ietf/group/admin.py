@@ -1,9 +1,11 @@
-# Copyright The IETF Trust 2010-2020, All Rights Reserved
+# Copyright The IETF Trust 2010-2024, All Rights Reserved
 # -*- coding: utf-8 -*-
 
 import re
 
 from functools import update_wrapper
+
+from base64 import b64encode
 
 import debug # pyflakes:ignore
 
@@ -12,15 +14,16 @@ from django import forms
 from django.contrib import admin
 from django.contrib.admin.utils import unquote
 from django.core.management import load_command_class
+from django.db.models import BinaryField
 from django.http import Http404
 from django.shortcuts import render
-from django.utils.encoding import force_text
+from django.utils.encoding import force_str
 from django.utils.html import escape
-from django.utils.translation import ugettext as _
+from django.utils.translation import gettext as _
 
 from ietf.group.models import (Group, GroupFeatures, GroupHistory, GroupEvent, GroupURL, GroupMilestone,
     GroupMilestoneHistory, GroupStateTransitions, Role, RoleHistory, ChangeStateGroupEvent,
-    MilestoneGroupEvent, GroupExtResource, )
+    MilestoneGroupEvent, GroupExtResource, Appeal, AppealArtifact )
 from ietf.name.models import GroupTypeName
 
 from ietf.utils.validators import validate_external_resource_value
@@ -68,6 +71,12 @@ class GroupForm(forms.ModelForm):
                 error_msg = (
                     'Acronym is invalid. For groups that create documents, the acronym must be at least '
                     'two characters and only contain lowercase letters and numbers starting with a letter.'
+                )
+            elif self.cleaned_data['type'].pk == 'sdo':
+                valid_re = r'^[a-z0-9][a-z0-9-]*[a-z0-9]$'
+                error_msg = (
+                    'Acronym is invalid. It must be at least two characters and only contain lowercase '
+                    'letters and numbers. It may contain hyphens, but that is discouraged.'
                 )
             else:
                 valid_re = r'^[a-z][a-z0-9-]*[a-z0-9]$'
@@ -152,7 +161,7 @@ class GroupAdmin(admin.ModelAdmin):
             permission_denied(request, "You don't have edit permissions for this change.")
 
         if obj is None:
-            raise Http404(_('%(name)s object with primary key %(key)r does not exist.') % {'name': force_text(opts.verbose_name), 'key': escape(object_id)})
+            raise Http404(_('%(name)s object with primary key %(key)r does not exist.') % {'name': force_str(opts.verbose_name), 'key': escape(object_id)})
 
         return self.send_reminder(request, sdo=obj)
     
@@ -291,3 +300,52 @@ class GroupExtResourceAdmin(admin.ModelAdmin):
     search_fields = ['group__acronym', 'value', 'display_name', 'name__slug',]
     raw_id_fields = ['group', ]
 admin.site.register(GroupExtResource, GroupExtResourceAdmin)
+
+class AppealAdmin(admin.ModelAdmin):
+    list_display = ["group", "date", "name"]
+    search_fields = ["group__acronym", "date", "name"]
+    raw_id_fields = ["group"]
+admin.site.register(Appeal, AppealAdmin)
+
+# From https://stackoverflow.com/questions/58529099/adding-file-upload-widget-for-binaryfield-to-django-admin
+class BinaryFileInput(forms.ClearableFileInput):
+
+    def is_initial(self, value):
+        """
+        Return whether value is considered to be initial value.
+        """
+        return bool(value)
+
+    def format_value(self, value):
+        """Format the size of the value in the db.
+
+        We can't render it's name or url, but we'd like to give some information
+        as to wether this file is not empty/corrupt.
+        """
+        if self.is_initial(value):
+            return f'{len(value)} bytes'
+
+
+    def value_from_datadict(self, data, files, name):
+        """Return the file contents so they can be put in the db."""
+        upload = super().value_from_datadict(data, files, name)
+        if upload:
+            bits = upload.read()
+            return b64encode(bits).decode("ascii") # Who made this so hard?
+            
+class RestrictContentTypeChoicesForm(forms.ModelForm):
+    content_type = forms.ChoiceField(
+        choices=(
+            ( "text/markdown;charset=utf-8", "Markdown"),
+            ( "application/pdf", "PDF")
+        )
+    )
+class AppealArtifactAdmin(admin.ModelAdmin):
+    list_display = ["display_title", "appeal","date"]
+    ordering = ["-appeal__date", "date"]
+    formfield_overrides = {
+        BinaryField: { "widget": BinaryFileInput() },
+    }
+    form = RestrictContentTypeChoicesForm
+
+admin.site.register(AppealArtifact, AppealArtifactAdmin)

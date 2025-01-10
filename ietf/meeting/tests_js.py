@@ -5,11 +5,9 @@
 import time
 import datetime
 import shutil
-import os
+import tempfile
 import re
-from unittest import skipIf
 
-import django
 from django.utils import timezone
 from django.utils.text import slugify
 from django.db.models import F
@@ -134,7 +132,7 @@ class EditMeetingScheduleTests(IetfSeleniumTestCase):
         self.assertEqual(session_info_container.find_element(By.CSS_SELECTOR, ".other-session .time").text, "not yet scheduled")
 
         # deselect
-        self.driver.find_element(By.CSS_SELECTOR, '.drop-target').click()
+        self.driver.find_element(By.CSS_SELECTOR, '.timeslot[data-type="regular"] .drop-target').click()
 
         self.assertEqual(session_info_container.find_elements(By.CSS_SELECTOR, ".title"), [])
         self.assertNotIn('other-session-selected', s2b_element.get_attribute('class'))
@@ -193,9 +191,9 @@ class EditMeetingScheduleTests(IetfSeleniumTestCase):
 
         # violated due to constraints - both the timeslot and its timeslot label
         self.assertTrue(self.driver.find_elements(By.CSS_SELECTOR, '#timeslot{}.would-violate-hint'.format(slot1.pk)))
-        # Find the timeslot label for slot1 - it's the first timeslot in the first room group
+        # Find the timeslot label for slot1 - it's the first timeslot in the room group containing room 1
         slot1_roomgroup_elt = self.driver.find_element(By.CSS_SELECTOR,
-            '.day-flow .day:first-child .room-group:nth-child(2)'  # count from 2 - first-child is the day label
+            f'.day-flow .day:first-child .room-group[data-rooms="{room1.pk}"]'
         )
         self.assertTrue(
             slot1_roomgroup_elt.find_elements(By.CSS_SELECTOR,
@@ -251,7 +249,9 @@ class EditMeetingScheduleTests(IetfSeleniumTestCase):
         self.assertTrue(s1_element.is_displayed())  # should still be displayed
         self.assertIn('hidden-parent', s1_element.get_attribute('class'),
                       'Session should be hidden when parent disabled')
-        s1_element.click()  # try to select
+        
+        self.scroll_and_click((By.CSS_SELECTOR, '#session{}'.format(s1.pk)))
+
         self.assertNotIn('selected', s1_element.get_attribute('class'),
                          'Session should not be selectable when parent disabled')
 
@@ -301,9 +301,9 @@ class EditMeetingScheduleTests(IetfSeleniumTestCase):
                         'Session s1 should have moved to second meeting day')
 
         # swap timeslot column - put session in a differently-timed timeslot
-        self.driver.find_element(By.CSS_SELECTOR,
+        self.scroll_and_click((By.CSS_SELECTOR,
             '.day .swap-timeslot-col[data-timeslot-pk="{}"]'.format(slot1b.pk)
-        ).click()  # open modal on the second timeslot for room1
+        ))  # open modal on the second timeslot for room1
         self.assertTrue(self.driver.find_element(By.CSS_SELECTOR, "#swap-timeslot-col-modal").is_displayed())
         self.driver.find_element(By.CSS_SELECTOR,
             '#swap-timeslot-col-modal input[name="target_timeslot"][value="{}"]'.format(slot4.pk)
@@ -501,7 +501,7 @@ class EditMeetingScheduleTests(IetfSeleniumTestCase):
         clicked_index = 1
         # scroll so the button we want to click is just below the navbar, otherwise it may
         # fall beneath the sessions panel
-        navbar = self.driver.find_element_by_class_name('navbar')
+        navbar = self.driver.find_element(By.CSS_SELECTOR, '.navbar')
         self.driver.execute_script(
             'window.scrollBy({top: %s, behavior: "instant"})' % (
                     future_swap_days_buttons[1].location['y'] - navbar.size['height']
@@ -833,7 +833,7 @@ class EditMeetingScheduleTests(IetfSeleniumTestCase):
     def test_session_constraint_hints(self):
         """Selecting a session should mark conflicting sessions
 
-        To test for recurrence of https://trac.ietf.org/trac/ietfdb/ticket/3327 need to have some constraints that
+        To test for recurrence of https://github.com/ietf-tools/datatracker/issues/3327 need to have some constraints that
         do not conflict. Testing with only violated constraints does not exercise the code adequately.
         """
         meeting = MeetingFactory(type_id='ietf', date=date_today(), populate_schedule=False)
@@ -880,51 +880,15 @@ class EditMeetingScheduleTests(IetfSeleniumTestCase):
         self.assertNotIn('would-violate-hint', session_elements[4].get_attribute('class'),
                          'Constraint violation should not be indicated on non-conflicting session')
 
-@ifSeleniumEnabled
-@skipIf(django.VERSION[0]==2, "Skipping test with race conditions under Django 2")
-class ScheduleEditTests(IetfSeleniumTestCase):
-    def testUnschedule(self):
-
-        meeting = make_meeting_test_data()
-        
-        self.assertEqual(SchedTimeSessAssignment.objects.filter(session__meeting=meeting, session__group__acronym='mars', schedule__name='test-schedule').count(),1)
-
-
-        ss = list(SchedTimeSessAssignment.objects.filter(session__meeting__number=72,session__group__acronym='mars',schedule__name='test-schedule')) # pyflakes:ignore
-
-        self.login()
-        url = self.absreverse('ietf.meeting.views.edit_meeting_schedule',kwargs=dict(num='72',name='test-schedule',owner='plain@example.com'))
-        self.driver.get(url)
-
-        # driver.get() will wait for scripts to finish, but not ajax
-        # requests.  Wait for completion of the permissions check:
-        read_only_note = self.driver.find_element(By.ID, 'read_only')
-        WebDriverWait(self.driver, 10).until(expected_conditions.invisibility_of_element(read_only_note), "Read-only schedule")
-
-        s1 = Session.objects.filter(group__acronym='mars', meeting=meeting).first()
-        selector = "#session_{}".format(s1.pk)
-        WebDriverWait(self.driver, 30).until(expected_conditions.presence_of_element_located((By.CSS_SELECTOR, selector)), "Did not find %s"%selector)
-
-        self.assertEqual(self.driver.find_elements(By.CSS_SELECTOR, "#sortable-list #session_{}".format(s1.pk)), [])
-
-        element = self.driver.find_element(By.ID, 'session_{}'.format(s1.pk))
-        target  = self.driver.find_element(By.ID, 'sortable-list')
-        ActionChains(self.driver).drag_and_drop(element,target).perform()
-
-        self.assertTrue(self.driver.find_elements(By.CSS_SELECTOR, "#sortable-list #session_{}".format(s1.pk)))
-
-        time.sleep(0.1) # The API that modifies the database runs async
-
-        self.assertEqual(SchedTimeSessAssignment.objects.filter(session__meeting__number=72,session__group__acronym='mars',schedule__name='test-schedule').count(),0)
 
 @ifSeleniumEnabled
 class SlideReorderTests(IetfSeleniumTestCase):
     def setUp(self):
         super(SlideReorderTests, self).setUp()
         self.session = SessionFactory(meeting__type_id='ietf', status_id='sched')
-        self.session.sessionpresentation_set.create(document=DocumentFactory(type_id='slides',name='one'),order=1)
-        self.session.sessionpresentation_set.create(document=DocumentFactory(type_id='slides',name='two'),order=2)
-        self.session.sessionpresentation_set.create(document=DocumentFactory(type_id='slides',name='three'),order=3)
+        self.session.presentations.create(document=DocumentFactory(type_id='slides',name='one'),order=1)
+        self.session.presentations.create(document=DocumentFactory(type_id='slides',name='two'),order=2)
+        self.session.presentations.create(document=DocumentFactory(type_id='slides',name='three'),order=3)
 
     def secr_login(self):
         self.login('secretary')
@@ -944,7 +908,7 @@ class SlideReorderTests(IetfSeleniumTestCase):
         ActionChains(self.driver).drag_and_drop(second,third).perform()
 
         time.sleep(0.1) # The API that modifies the database runs async
-        names=self.session.sessionpresentation_set.values_list('document__name',flat=True) 
+        names=self.session.presentations.values_list('document__name',flat=True) 
         self.assertEqual(list(names),['one','three','two'])
 
 @ifSeleniumEnabled
@@ -977,13 +941,8 @@ class InterimTests(IetfSeleniumTestCase):
     def tempdir(self, label):
         # Borrowed from  test_utils.TestCase
         slug = slugify(self.__class__.__name__.replace('.','-'))
-        dirname = "tmp-{label}-{slug}-dir".format(**locals())
-        if 'VIRTUAL_ENV' in os.environ:
-            dirname = os.path.join(os.environ['VIRTUAL_ENV'], dirname)
-        path = os.path.abspath(dirname)
-        if not os.path.exists(path):
-            os.mkdir(path)
-        return path
+        suffix = "-{label}-{slug}-dir".format(**locals())
+        return tempfile.mkdtemp(suffix=suffix)
 
     def displayed_interims(self, groups=None):
         sessions = add_event_info_to_session_qs(
@@ -1083,6 +1042,7 @@ class InterimTests(IetfSeleniumTestCase):
     def do_upcoming_view_filter_test(self, querystring, visible_meetings=()):
         self.login()
         self.driver.get(self.absreverse('ietf.meeting.views.upcoming') + querystring)
+        time.sleep(0.2)  # gross, but give the filter JS time to do its thing 
         self.assert_upcoming_meeting_visibility(visible_meetings)
         self.assert_upcoming_meeting_calendar(visible_meetings)
         self.assert_upcoming_view_filter_matches_ics_filter(querystring)
@@ -1270,10 +1230,13 @@ class InterimTests(IetfSeleniumTestCase):
         self.driver.get(self.absreverse('ietf.meeting.views.upcoming'))
         tz_select_input = self.driver.find_element(By.ID, 'timezone-select')
         tz_select_bottom_input = self.driver.find_element(By.ID, 'timezone-select-bottom')
-        local_tz_link = self.driver.find_element(By.ID, 'local-timezone')
-        utc_tz_link = self.driver.find_element(By.ID, 'utc-timezone')
-        local_tz_bottom_link = self.driver.find_element(By.ID, 'local-timezone-bottom')
-        utc_tz_bottom_link = self.driver.find_element(By.ID, 'utc-timezone-bottom')
+        
+        # For things we click, need to click the labels / actually visible items. The actual inputs are hidden
+        # and managed by the JS.
+        local_tz_link = self.driver.find_element(By.CSS_SELECTOR, 'label[for="local-timezone"]')
+        utc_tz_link = self.driver.find_element(By.CSS_SELECTOR, 'label[for="utc-timezone"]')
+        local_tz_bottom_link = self.driver.find_element(By.CSS_SELECTOR, 'label[for="local-timezone-bottom"]')
+        utc_tz_bottom_link = self.driver.find_element(By.CSS_SELECTOR, 'label[for="utc-timezone-bottom"]')
         
         # wait for the select box to be updated - look for an arbitrary time zone to be in
         # its options list to detect this
@@ -1283,7 +1246,10 @@ class InterimTests(IetfSeleniumTestCase):
                 (By.CSS_SELECTOR, '#timezone-select > option[value="%s"]' % arbitrary_tz)
             )
         )
-
+        tz_selector_clickables = self.driver.find_elements(By.CSS_SELECTOR, ".tz-display .select2")
+        self.assertEqual(len(tz_selector_clickables), 2)
+        (tz_selector_top, tz_selector_bottom) = tz_selector_clickables
+        
         arbitrary_tz_bottom_opt = tz_select_bottom_input.find_element(By.CSS_SELECTOR,
             '#timezone-select-bottom > option[value="%s"]' % arbitrary_tz)
 
@@ -1304,8 +1270,7 @@ class InterimTests(IetfSeleniumTestCase):
         _assert_ietf_tz_correct(ietf_meetings, local_tz)
 
         # click 'utc' button
-        self.driver.execute_script("arguments[0].click();", utc_tz_link)  # FIXME-LARS: not working:
-        # utc_tz_link.click()
+        utc_tz_link.click()
         self.wait.until(expected_conditions.element_to_be_selected(utc_tz_opt))
         self.assertFalse(local_tz_opt.is_selected())
         self.assertFalse(local_tz_bottom_opt.is_selected())
@@ -1317,8 +1282,7 @@ class InterimTests(IetfSeleniumTestCase):
         _assert_ietf_tz_correct(ietf_meetings, 'UTC')
 
         # click back to 'local'
-        self.driver.execute_script("arguments[0].click();", local_tz_link)  # FIXME-LARS: not working:
-        # local_tz_link.click()
+        local_tz_link.click()
         self.wait.until(expected_conditions.element_to_be_selected(local_tz_opt))
         self.assertTrue(local_tz_opt.is_selected())
         self.assertTrue(local_tz_bottom_opt.is_selected())
@@ -1330,7 +1294,12 @@ class InterimTests(IetfSeleniumTestCase):
         _assert_ietf_tz_correct(ietf_meetings, local_tz)
 
         # Now select a different item from the select input
-        arbitrary_tz_opt.click()
+        tz_selector_top.click()
+        self.wait.until(
+            expected_conditions.presence_of_element_located(
+                (By.CSS_SELECTOR, 'span.select2-container .select2-results li[id$="America/Halifax"]')
+            )
+        ).click()
         self.wait.until(expected_conditions.element_to_be_selected(arbitrary_tz_opt))
         self.assertFalse(local_tz_opt.is_selected())
         self.assertFalse(local_tz_bottom_opt.is_selected())
@@ -1343,8 +1312,8 @@ class InterimTests(IetfSeleniumTestCase):
 
         # Now repeat those tests using the widgets at the bottom of the page
         # click 'utc' button
-        self.driver.execute_script("arguments[0].click();", utc_tz_bottom_link)  # FIXME-LARS: not working:
-        # utc_tz_bottom_link.click()
+        self.scroll_to_element(utc_tz_bottom_link)
+        utc_tz_bottom_link.click()
         self.wait.until(expected_conditions.element_to_be_selected(utc_tz_opt))
         self.assertFalse(local_tz_opt.is_selected())
         self.assertFalse(local_tz_bottom_opt.is_selected())
@@ -1356,8 +1325,8 @@ class InterimTests(IetfSeleniumTestCase):
         _assert_ietf_tz_correct(ietf_meetings, 'UTC')
 
         # click back to 'local'
-        self.driver.execute_script("arguments[0].click();", local_tz_bottom_link)  # FIXME-LARS: not working:
-        # local_tz_bottom_link.click()
+        self.scroll_to_element(local_tz_bottom_link)
+        local_tz_bottom_link.click()
         self.wait.until(expected_conditions.element_to_be_selected(local_tz_opt))
         self.assertTrue(local_tz_opt.is_selected())
         self.assertTrue(local_tz_bottom_opt.is_selected())
@@ -1369,7 +1338,13 @@ class InterimTests(IetfSeleniumTestCase):
         _assert_ietf_tz_correct(ietf_meetings, local_tz)
 
         # Now select a different item from the select input
-        arbitrary_tz_bottom_opt.click()
+        self.scroll_to_element(tz_selector_bottom)
+        tz_selector_bottom.click()
+        self.wait.until(
+            expected_conditions.presence_of_element_located(
+                (By.CSS_SELECTOR, 'span.select2-container .select2-results li[id$="America/Halifax"]')
+            )
+        ).click()
         self.wait.until(expected_conditions.element_to_be_selected(arbitrary_tz_opt))
         self.assertFalse(local_tz_opt.is_selected())
         self.assertFalse(local_tz_bottom_opt.is_selected())
@@ -1400,13 +1375,8 @@ class InterimTests(IetfSeleniumTestCase):
         self.assertFalse(modal_div.is_displayed())
 
         # Click the 'materials' button
-        open_modal_button = self.wait.until(
-            expected_conditions.element_to_be_clickable(
-                (By.CSS_SELECTOR, '[data-bs-target="#modal-%s"]' % slug)
-            ),
-            'Modal open button not found or not clickable',
-        )
-        open_modal_button.click()
+        open_modal_button_locator = (By.CSS_SELECTOR, '[data-bs-target="#modal-%s"]' % slug)
+        self.scroll_and_click(open_modal_button_locator)
         self.wait.until(
             expected_conditions.visibility_of(modal_div),
             'Modal did not become visible after clicking open button',
@@ -1420,6 +1390,7 @@ class InterimTests(IetfSeleniumTestCase):
             ),
             'Modal close button not found or not clickable',
         )
+        time.sleep(0.3)  # gross, but the button is clickable while still fading in
         close_modal_button.click()
         self.wait.until(
             expected_conditions.invisibility_of_element(modal_div),
@@ -1531,7 +1502,7 @@ class EditTimeslotsTests(IetfSeleniumTestCase):
     """Test the timeslot editor"""
     def setUp(self):
         super().setUp()
-        self.meeting: Meeting = MeetingFactory(
+        self.meeting: Meeting = MeetingFactory(  # type: ignore[annotation-unchecked]
             type_id='ietf',
             number=120,
             date=date_today() + datetime.timedelta(days=10),
@@ -1608,13 +1579,13 @@ class EditTimeslotsTests(IetfSeleniumTestCase):
         delete_time = delete_time_local.astimezone(datetime.timezone.utc)
         duration = datetime.timedelta(minutes=60)
 
-        delete: [TimeSlot] = TimeSlotFactory.create_batch(
+        delete: [TimeSlot] = TimeSlotFactory.create_batch(  # type: ignore[annotation-unchecked]
             2,
             meeting=self.meeting,
             time=delete_time_local,
             duration=duration,
         )
-        keep: [TimeSlot] = [
+        keep: [TimeSlot] = [  # type: ignore[annotation-unchecked]
             TimeSlotFactory(
                 meeting=self.meeting,
                 time=keep_time,
@@ -1651,14 +1622,14 @@ class EditTimeslotsTests(IetfSeleniumTestCase):
         hours = [10, 12]
         other_days = [self.meeting.get_meeting_date(d) for d in range(1, 3)]
 
-        delete: [TimeSlot] = [
+        delete: [TimeSlot] = [  # type: ignore[annotation-unchecked]
             TimeSlotFactory(
                 meeting=self.meeting,
                 time=datetime_from_date(delete_day, self.meeting.tz()).replace(hour=hour),
             ) for hour in hours
         ]
 
-        keep: [TimeSlot] = [
+        keep: [TimeSlot] = [  # type: ignore[annotation-unchecked]
             TimeSlotFactory(
                 meeting=self.meeting,
                 time=datetime_from_date(day, self.meeting.tz()).replace(hour=hour),

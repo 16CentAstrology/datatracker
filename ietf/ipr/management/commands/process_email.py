@@ -9,7 +9,7 @@ from textwrap import dedent
 from django.core.management import CommandError
 
 from ietf.utils.management.base import EmailOnFailureCommand
-from ietf.ipr.mail import process_response_email
+from ietf.ipr.mail import process_response_email, UndeliverableIprResponseError
 
 import debug                            # pyflakes:ignore
 
@@ -23,11 +23,15 @@ class Command(EmailOnFailureCommand):
 
     def handle(self, *args, **options):
         email = options.get('email', None)
-        binary_input = io.open(email, 'rb') if email else sys.stdin.buffer
-        self.msg_bytes = binary_input.read()
+        if email:
+            binary_input = io.open(email, 'rb')
+            self.msg_bytes = binary_input.read()
+            binary_input.close()
+        else:
+            self.msg_bytes = sys.stdin.buffer.read()
         try:
             process_response_email(self.msg_bytes)
-        except ValueError as e:
+        except (ValueError, UndeliverableIprResponseError) as e:
             raise CommandError(e)
 
     failure_subject = 'Error during ipr email processing'

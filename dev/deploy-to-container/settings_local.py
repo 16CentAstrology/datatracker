@@ -8,20 +8,12 @@ ALLOWED_HOSTS = ['*']
 DATABASES = {
     'default': {
         'HOST': '__DBHOST__',
-        'PORT': 3306,
-        'NAME': 'ietf_utf8',
-        'ENGINE': 'django.db.backends.mysql',
+        'PORT': 5432,
+        'NAME': 'datatracker',
+        'ENGINE': 'django.db.backends.postgresql',
         'USER': 'django',
         'PASSWORD': 'RkTkDPFnKpko',
-        'OPTIONS': {
-            'sql_mode': 'STRICT_TRANS_TABLES',
-            'init_command': 'SET storage_engine=InnoDB; SET names "utf8"',
-        },
     },
-}
-
-DATABASE_TEST_OPTIONS = {
-    'init_command': 'SET storage_engine=InnoDB',
 }
 
 SECRET_KEY = "__SECRETKEY__"
@@ -29,11 +21,8 @@ SECRET_KEY = "__SECRETKEY__"
 CELERY_BROKER_URL = '__MQCONNSTR__'
 
 IDSUBMIT_IDNITS_BINARY = "/usr/local/bin/idnits"
-IDSUBMIT_REPOSITORY_PATH = "test/id/"
-IDSUBMIT_STAGING_PATH = "test/staging/"
-INTERNET_DRAFT_ARCHIVE_DIR = "test/archive/"
-INTERNET_ALL_DRAFTS_ARCHIVE_DIR = "test/archive/"
-RFC_PATH = "test/rfc/"
+IDSUBMIT_REPOSITORY_PATH = "/test/id/"
+IDSUBMIT_STAGING_PATH = "/test/staging/"
 
 AGENDA_PATH = '/assets/www6s/proceedings/'
 MEETINGHOST_LOGO_PATH = AGENDA_PATH
@@ -51,7 +40,6 @@ PHOTOS_DIR = MEDIA_ROOT + PHOTOS_DIRNAME
 
 SUBMIT_YANG_CATALOG_MODEL_DIR = '/assets/ietf-ftp/yang/catalogmod/'
 SUBMIT_YANG_DRAFT_MODEL_DIR = '/assets/ietf-ftp/yang/draftmod/'
-SUBMIT_YANG_INVAL_MODEL_DIR = '/assets/ietf-ftp/yang/invalmod/'
 SUBMIT_YANG_IANA_MODEL_DIR = '/assets/ietf-ftp/yang/ianamod/'
 SUBMIT_YANG_RFC_MODEL_DIR   = '/assets/ietf-ftp/yang/rfcmod/'
 
@@ -64,17 +52,30 @@ INTERNAL_IPS = [".".join(ip.split(".")[:-1] + ["1"]) for ip in ips]
 #    'ietf.context_processors.sql_debug',
 # ]
 
-DOCUMENT_PATH_PATTERN = '/assets/ietf-ftp/{doc.type_id}/'
+DOCUMENT_PATH_PATTERN = '/assets/ietfdata/doc/{doc.type_id}/'
 INTERNET_DRAFT_PATH = '/assets/ietf-ftp/internet-drafts/'
 RFC_PATH = '/assets/ietf-ftp/rfc/'
 CHARTER_PATH = '/assets/ietf-ftp/charter/'
 BOFREQ_PATH = '/assets/ietf-ftp/bofreq/'
 CONFLICT_REVIEW_PATH = '/assets/ietf-ftp/conflict-reviews/'
 STATUS_CHANGE_PATH = '/assets/ietf-ftp/status-changes/'
-INTERNET_DRAFT_ARCHIVE_DIR = '/assets/ietf-ftp/internet-drafts/'
-INTERNET_ALL_DRAFTS_ARCHIVE_DIR = '/assets/ietf-ftp/internet-drafts/'
+INTERNET_DRAFT_ARCHIVE_DIR = '/assets/collection/draft-archive'
+INTERNET_ALL_DRAFTS_ARCHIVE_DIR = '/assets/archive/id'
+BIBXML_BASE_PATH = '/assets/ietfdata/derived/bibxml'
+IDSUBMIT_REPOSITORY_PATH = INTERNET_DRAFT_PATH
+FTP_DIR = '/assets/ftp'
+NFS_METRICS_TMP_DIR = '/assets/tmp'
 
 NOMCOM_PUBLIC_KEYS_DIR = 'data/nomcom_keys/public_keys/'
-SLIDE_STAGING_PATH = 'test/staging/'
+SLIDE_STAGING_PATH = '/test/staging/'
 
 DE_GFM_BINARY = '/usr/local/bin/de-gfm'
+
+# No real secrets here, these are public testing values _only_
+APP_API_TOKENS = {
+  "ietf.api.views.ingest_email_test": ["ingestion-test-token"]
+}
+
+
+# OIDC configuration
+SITE_URL = 'https://__HOSTNAME__'

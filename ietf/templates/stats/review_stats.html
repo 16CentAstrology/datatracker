@@ -5,6 +5,7 @@
 {% block pagehead %}
     <link rel="stylesheet" href="{% static "ietf/css/list.css" %}">
     <link rel="stylesheet" href="{% static 'ietf/css/datepicker.css' %}">
+    <link rel="stylesheet" href="{% static "ietf/css/highcharts.css" %}">
 {% endblock %}
 {% block content %}
     {% origin %}
@@ -297,7 +298,7 @@
             </script>
         {% endif %}
         {% if stats_type != "time" %}
-            <p class="text-muted text-end">
+            <p class="text-body-secondary text-end">
                 Note:
                 {% if level == "team" %}
                     teams

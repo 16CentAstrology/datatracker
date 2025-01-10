@@ -20,11 +20,11 @@ import debug                            # pyflakes:ignore
 from .texescape import init as texescape_init, tex_escape_map
 
 tlds_sorted = sorted(tlds.tld_set, key=len, reverse=True)
-protocols = copy.copy(bleach.sanitizer.ALLOWED_PROTOCOLS)
-protocols.append("ftp")  # we still have some ftp links
-protocols.append("xmpp")  # we still have some xmpp links
+protocols = set(bleach.sanitizer.ALLOWED_PROTOCOLS)
+protocols.add("ftp")  # we still have some ftp links
+protocols.add("xmpp")  # we still have some xmpp links
 
-tags = set(copy.copy(bleach.sanitizer.ALLOWED_TAGS)).union(
+tags = set(bleach.sanitizer.ALLOWED_TAGS).union(
     {
         # fmt: off
         'a', 'abbr', 'acronym', 'address', 'b', 'big',
@@ -46,12 +46,22 @@ bleach_cleaner = bleach.sanitizer.Cleaner(
     tags=tags, attributes=attributes, protocols=protocols, strip=True
 )
 
+liberal_tags = copy.copy(tags)
+liberal_attributes = copy.copy(attributes)
+liberal_tags.update(["img","figure","figcaption"])
+liberal_attributes["img"] = ["src","alt"]
+
+liberal_bleach_cleaner = bleach.sanitizer.Cleaner(
+    tags=liberal_tags, attributes=liberal_attributes, protocols=protocols, strip=True
+)
+
 validate_url = URLValidator()
 
 
 def check_url_validity(attrs, new=False):
     if (None, "href") not in attrs:
-        return None
+        # rfc2html creates a tags without href
+        return attrs
     url = attrs[(None, "href")]
     try:
         if url.startswith("http"):

@@ -3,9 +3,7 @@
 
 
 from django.contrib import admin
-from django.utils.encoding import force_text
-
-from ietf.utils.models import VersionInfo
+from django.utils.encoding import force_str
 
 def name(obj):
     if hasattr(obj, 'abbrev'):
@@ -14,7 +12,7 @@ def name(obj):
         if callable(obj.name):
             name = obj.name()
         else:
-            name = force_text(obj.name)
+            name = force_str(obj.name)
         if name:
             return name
     return str(obj)
@@ -58,8 +56,3 @@ class DumpInfoAdmin(admin.ModelAdmin):
     list_display = ['date', 'host', 'tz']
     list_filter = ['date']
 admin.site.register(DumpInfo, DumpInfoAdmin)
-
-class VersionInfoAdmin(admin.ModelAdmin):
-    list_display = ['command', 'switch', 'version', 'time', ]
-admin.site.register(VersionInfo, VersionInfoAdmin)
-
