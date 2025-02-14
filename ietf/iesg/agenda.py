@@ -4,7 +4,6 @@
 
 # utilities for constructing agendas for IESG telechats
 
-import io
 import datetime
 from collections import OrderedDict
 
@@ -15,9 +14,9 @@ import debug                            # pyflakes:ignore
 
 from ietf.doc.models import Document, LastCallDocEvent, ConsensusDocEvent
 from ietf.doc.utils_search import fill_in_telechat_date
-from ietf.iesg.models import TelechatDate, TelechatAgendaItem
+from ietf.iesg.models import TelechatDate, TelechatAgendaItem, TelechatAgendaContent
 from ietf.review.utils import review_assignments_to_list_for_docs
-from ietf.utils.timezone import date_today
+from ietf.utils.timezone import date_today, make_aware
 
 def get_agenda_date(date=None):
     if not date:
@@ -26,8 +25,9 @@ def get_agenda_date(date=None):
         except IndexError:
             return date_today()
     else:
+        parsed_date = make_aware(datetime.datetime.strptime(date, "%Y-%m-%d"), settings.TIME_ZONE).date()
         try:
-            return TelechatDate.objects.active().get(date=datetime.datetime.strptime(date, "%Y-%m-%d").date()).date
+            return TelechatDate.objects.active().get(date=parsed_date).date
         except (ValueError, TelechatDate.DoesNotExist):
             raise Http404
 
@@ -66,7 +66,7 @@ def get_doc_section(doc):
     elif doc.type_id == 'statchg':
         protocol_action = False
         for relation in doc.relateddocument_set.filter(relationship__slug__in=('tops','tois','tohist','toinf','tobcp','toexp')):
-            if relation.relationship_id in ('tops','tois') or relation.target.document.std_level_id in ('std','ds','ps'):
+            if relation.relationship_id in ('tops','tois') or relation.target.std_level_id in ('std','ds','ps'):
                 protocol_action = True
         if protocol_action:
             s = "2.3"
@@ -139,20 +139,18 @@ def agenda_sections():
         ])
 
 def fill_in_agenda_administrivia(date, sections):
-    extra_info_files = (
-        ("1.1", "roll_call", settings.IESG_ROLL_CALL_FILE),
-        ("1.3", "minutes", settings.IESG_MINUTES_FILE),
-        ("1.4", "action_items", settings.IESG_TASK_FILE),
-        )
+    extra_info = (
+        ("1.1", "roll_call"),
+        ("1.3", "minutes"),
+        ("1.4", "action_items"),
+    )
 
-    for s, key, filename in extra_info_files:
+    for s, key in extra_info:
         try:
-            with io.open(filename, 'r', encoding='utf-8', errors='replace') as f:
-                t = f.read().strip()
-        except IOError:
-            t = "(Error reading %s)" % filename
-
-        sections[s]["text"] = t
+            text = TelechatAgendaContent.objects.get(section__slug=key).text
+        except TelechatAgendaContent.DoesNotExist:
+            text = ""
+        sections[s]["text"] = text
 
 def fill_in_agenda_docs(date, sections, docs=None):
     if not docs:
@@ -188,7 +186,7 @@ def fill_in_agenda_docs(date, sections, docs=None):
 
             doc.review_assignments = review_assignments_for_docs.get(doc.name, [])
         elif doc.type_id == "conflrev":
-            doc.conflictdoc = doc.relateddocument_set.get(relationship__slug='conflrev').target.document
+            doc.conflictdoc = doc.relateddocument_set.get(relationship__slug='conflrev').target
         elif doc.type_id == "charter":
             pass
 

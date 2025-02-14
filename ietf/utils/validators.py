@@ -11,10 +11,11 @@ from urllib.parse import urlparse, urlsplit, urlunsplit
 from django.apps import apps
 from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
-from django.core.validators import RegexValidator, URLValidator, EmailValidator, _lazy_re_compile, BaseValidator
+from django.core.validators import RegexValidator, URLValidator, EmailValidator, BaseValidator
 from django.template.defaultfilters import filesizeformat
 from django.utils.deconstruct import deconstructible
 from django.utils.ipv6 import is_valid_ipv6_address
+from django.utils.regex_helper import _lazy_re_compile  # type: ignore
 from django.utils.translation import gettext_lazy as _
 
 import debug                            # pyflakes:ignore
@@ -59,6 +60,7 @@ class RegexStringValidator(object):
 
 validate_regular_expression_string = RegexStringValidator()
 
+
 def validate_file_size(file, missing_ok=False):
     try:
         size = file.size
@@ -68,12 +70,18 @@ def validate_file_size(file, missing_ok=False):
         else:
             raise
 
-    if size > settings.SECR_MAX_UPLOAD_SIZE:
-        raise ValidationError('Please keep filesize under %s. Requested upload size was %s' % (filesizeformat(settings.SECR_MAX_UPLOAD_SIZE), filesizeformat(file.size)))
+    if size > settings.DATATRACKER_MAX_UPLOAD_SIZE:
+        raise ValidationError(
+            "Please keep filesize under {}. Requested upload size was {}".format(
+                filesizeformat(settings.DATATRACKER_MAX_UPLOAD_SIZE),
+                filesizeformat(file.size)
+            )
+        )
+
 
 def validate_mime_type(file, valid, missing_ok=False):
     try:
-        file.open()
+        file.open() # Callers expect this to remain open. Consider refactoring.
     except FileNotFoundError:
         if missing_ok:
             return None, None

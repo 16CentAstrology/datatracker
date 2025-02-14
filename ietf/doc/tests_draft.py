@@ -1,4 +1,4 @@
-# Copyright The IETF Trust 2011-2020, All Rights Reserved
+# Copyright The IETF Trust 2011-2023, All Rights Reserved
 # -*- coding: utf-8 -*-
 
 
@@ -11,6 +11,7 @@ from collections import Counter
 from pathlib import Path
 from pyquery import PyQuery
 
+from django.db.models import Q
 from django.urls import reverse as urlreverse
 from django.conf import settings
 from django.utils import timezone
@@ -18,13 +19,14 @@ from django.utils.html import escape
 
 import debug                            # pyflakes:ignore
 
-from ietf.doc.expire import get_expired_drafts, send_expire_notice_for_draft, expire_draft
-from ietf.doc.factories import IndividualDraftFactory, WgDraftFactory, RgDraftFactory, DocEventFactory
+from ietf.doc.expire import expirable_drafts, get_expired_drafts, send_expire_notice_for_draft, expire_draft
+from ietf.doc.factories import EditorialDraftFactory, IndividualDraftFactory, WgDraftFactory, RgDraftFactory, DocEventFactory
 from ietf.doc.models import ( Document, DocReminder, DocEvent,
     ConsensusDocEvent, LastCallDocEvent, RelatedDocument, State, TelechatDocEvent, 
     WriteupDocEvent, DocRelationshipName, IanaExpertDocEvent )
 from ietf.doc.utils import get_tags_for_stream_id, create_ballot_if_not_open
-from ietf.name.models import StreamName, DocTagName
+from ietf.doc.views_draft import AdoptDraftForm
+from ietf.name.models import DocTagName, RoleName
 from ietf.group.factories import GroupFactory, RoleFactory
 from ietf.group.models import Group, Role
 from ietf.person.factories import PersonFactory, EmailFactory
@@ -34,7 +36,7 @@ from ietf.iesg.models import TelechatDate
 from ietf.utils.test_utils import login_testing_unauthorized
 from ietf.utils.mail import outbox, empty_outbox, get_payload_text
 from ietf.utils.test_utils import TestCase
-from ietf.utils.timezone import date_today, datetime_from_date
+from ietf.utils.timezone import date_today, datetime_from_date, DEADLINE_TZINFO
 
 
 class ChangeStateTests(TestCase):
@@ -96,7 +98,7 @@ class ChangeStateTests(TestCase):
         draft.action_holders.add(ad)
 
         url = urlreverse('ietf.doc.views_draft.change_state', kwargs=dict(name=draft.name))
-        login_testing_unauthorized(self, "secretary", url)
+        login_testing_unauthorized(self, "ad", url)
 
         first_state = draft.get_state("draft-iesg")
         next_states = first_state.next_states.all()
@@ -151,6 +153,20 @@ class ChangeStateTests(TestCase):
         self.assertEqual(r.status_code, 200)
         q = PyQuery(r.content)
         self.assertEqual(len(q('form [type=submit]:contains("%s")' % first_state.name)), 1)
+
+        # try to change to an AD-forbidden state
+        r = self.client.post(url, dict(state=State.objects.get(used=True, type='draft-iesg', slug='ann').pk, comment='Test comment'))
+        self.assertEqual(r.status_code, 200)
+        q = PyQuery(r.content)
+        self.assertTrue(q('form .invalid-feedback'))
+
+        # try again as secretariat
+        self.client.logout()
+        login_testing_unauthorized(self, 'secretary', url)
+        r = self.client.post(url, dict(state=State.objects.get(used=True, type='draft-iesg', slug='ann').pk, comment='Test comment'))
+        self.assertEqual(r.status_code, 302)
+        draft = Document.objects.get(name=draft.name)
+        self.assertEqual(draft.get_state_slug('draft-iesg'), 'ann')
 
     def test_pull_from_rfc_queue(self):
         ad = Person.objects.get(user__username="ad")
@@ -309,6 +325,24 @@ class ChangeStateTests(TestCase):
         # action holders
         self.assertCountEqual(draft.action_holders.all(), [ad])
         
+    def test_iesg_state_edit_button(self):
+        ad = Person.objects.get(user__username="ad")
+        draft = WgDraftFactory(ad=ad,states=[('draft','active'),('draft-iesg','ad-eval')])
+
+        url = urlreverse("ietf.doc.views_doc.document_main", kwargs=dict(name=draft.name))
+        self.client.login(username="ad", password="ad+password")
+
+        r = self.client.get(url)
+        self.assertEqual(r.status_code, 200)
+        q = PyQuery(r.content)
+        self.assertIn("Edit", q('tr:contains("IESG state")').text())
+
+        draft.set_state(State.objects.get(used=True, type="draft-iesg", slug="dead"))
+        r = self.client.get(url)
+        self.assertEqual(r.status_code, 200)
+        q = PyQuery(r.content)
+        self.assertNotIn("Edit", q('tr:contains("IESG state")').text())
+
 
 class EditInfoTests(TestCase):
     def test_edit_info(self):
@@ -342,16 +376,14 @@ class EditInfoTests(TestCase):
                                   stream=draft.stream_id,
                                   ad=str(new_ad.pk),
                                   notify="test@example.com",
-                                  note="New note",
                                   telechat_date="",
                                   ))
         self.assertEqual(r.status_code, 302)
 
         draft = Document.objects.get(name=draft.name)
         self.assertEqual(draft.ad, new_ad)
-        self.assertEqual(draft.note, "New note")
         self.assertTrue(not draft.latest_event(TelechatDocEvent, type="scheduled_for_telechat"))
-        self.assertEqual(draft.docevent_set.count(), events_before + 3)
+        self.assertEqual(draft.docevent_set.count(), events_before + 2)
         self.assertEqual(len(outbox), mailbox_before + 1)
         self.assertTrue(draft.name in outbox[-1]['Subject'])
 
@@ -366,7 +398,6 @@ class EditInfoTests(TestCase):
                     stream=draft.stream_id,
                     ad=str(draft.ad_id),
                     notify=draft.notify,
-                    note="",
                     )
 
         # get
@@ -440,72 +471,61 @@ class EditInfoTests(TestCase):
         self.assertIn("may not leave enough time", get_payload_text(outbox[-1]))
 
     def test_start_iesg_process_on_draft(self):
-
         draft = WgDraftFactory(
             name="draft-ietf-mars-test2",
-            group__acronym='mars',
+            group__acronym="mars",
             intended_std_level_id="ps",
-            authors=[Person.objects.get(user__username='ad')],
-            )
-        
-        url = urlreverse('ietf.doc.views_draft.edit_info', kwargs=dict(name=draft.name))
+            authors=[Person.objects.get(user__username="ad")],
+        )
+
+        url = urlreverse("ietf.doc.views_draft.edit_info", kwargs=dict(name=draft.name))
         login_testing_unauthorized(self, "secretary", url)
 
         # normal get
         r = self.client.get(url)
         self.assertEqual(r.status_code, 200)
         q = PyQuery(r.content)
-        self.assertEqual(len(q('form select[name=intended_std_level]')), 1)
-        self.assertEqual("", q('form textarea[name=notify]')[0].value.strip())
+        self.assertEqual(len(q("form select[name=intended_std_level]")), 1)
+        self.assertEqual("", q("form textarea[name=notify]")[0].value.strip())
 
-        # add
-        events_before = draft.docevent_set.count()
+        events_before = list(draft.docevent_set.values_list("id", flat=True))
         mailbox_before = len(outbox)
 
         ad = Person.objects.get(name="Areað Irector")
 
-        r = self.client.post(url,
-                             dict(intended_std_level=str(draft.intended_std_level_id),
-                                  ad=ad.pk,
-                                  create_in_state=State.objects.get(used=True, type="draft-iesg", slug="watching").pk,
-                                  notify="test@example.com",
-                                  note="This is a note",
-                                  telechat_date="",
-                                  ))
+        r = self.client.post(
+            url,
+            dict(
+                intended_std_level=str(draft.intended_std_level_id),
+                ad=ad.pk,
+                notify="test@example.com",
+                telechat_date="",
+            ),
+        )
         self.assertEqual(r.status_code, 302)
 
         draft = Document.objects.get(name=draft.name)
-        self.assertEqual(draft.get_state_slug("draft-iesg"), "watching")
+        self.assertEqual(draft.get_state_slug("draft-iesg"), "pub-req")
+        self.assertEqual(draft.get_state_slug("draft-stream-ietf"), "sub-pub")
         self.assertEqual(draft.ad, ad)
-        self.assertEqual(draft.note, "This is a note")
-        self.assertTrue(not draft.latest_event(TelechatDocEvent, type="scheduled_for_telechat"))
-        self.assertEqual(draft.docevent_set.count(), events_before + 5)
+        self.assertTrue(
+            not draft.latest_event(TelechatDocEvent, type="scheduled_for_telechat")
+        )
+        # check that the expected events were created (don't insist on ordering)
+        self.assertCountEqual(
+            draft.docevent_set.exclude(id__in=events_before).values_list("type", flat=True),
+            [
+                "changed_action_holders",  # action holders set to AD
+                "changed_document",  # WG state set to sub-pub
+                "changed_document",  # AD set
+                "changed_document",  # state change notice email set
+                "started_iesg_process",  # IESG state is now pub-req
+            ],
+        )
         self.assertCountEqual(draft.action_holders.all(), [draft.ad])
-        events = list(draft.docevent_set.order_by('time', 'id'))
-        self.assertEqual(events[-5].type, "started_iesg_process")
-        self.assertEqual(len(outbox), mailbox_before+1)
-        self.assertTrue('IESG processing' in outbox[-1]['Subject'])
-        self.assertTrue('draft-ietf-mars-test2@' in outbox[-1]['To']) 
-
-        # Redo, starting in publication requested to make sure WG state is also set
-        draft.set_state(State.objects.get(type_id='draft-iesg', slug='idexists'))
-        draft.set_state(State.objects.get(type='draft-stream-ietf',slug='writeupw'))
-        draft.stream = StreamName.objects.get(slug='ietf')
-        draft.action_holders.clear()
-        draft.save_with_history([DocEvent.objects.create(doc=draft, rev=draft.rev, type="changed_stream", by=Person.objects.get(user__username="secretary"), desc="Test")])
-        r = self.client.post(url,
-                             dict(intended_std_level=str(draft.intended_std_level_id),
-                                  ad=ad.pk,
-                                  create_in_state=State.objects.get(used=True, type="draft-iesg", slug="pub-req").pk,
-                                  notify="test@example.com",
-                                  note="This is a note",
-                                  telechat_date="",
-                                  ))
-        self.assertEqual(r.status_code, 302)
-        draft = Document.objects.get(name=draft.name)
-        self.assertEqual(draft.get_state_slug('draft-iesg'),'pub-req')
-        self.assertEqual(draft.get_state_slug('draft-stream-ietf'),'sub-pub')
-        self.assertCountEqual(draft.action_holders.all(), [draft.ad])
+        self.assertEqual(len(outbox), mailbox_before + 1)
+        self.assertTrue("IESG processing" in outbox[-1]["Subject"])
+        self.assertTrue("draft-ietf-mars-test2@" in outbox[-1]["To"])
 
     def test_edit_consensus(self):
         draft = WgDraftFactory()
@@ -571,7 +591,7 @@ class ResurrectTests(DraftFileMixin, TestCase):
         r = self.client.get(url)
         self.assertEqual(r.status_code, 200)
         q = PyQuery(r.content)
-        self.assertEqual(len(q('form [type=submit]')), 1)
+        self.assertEqual(len(q('#content form [type=submit]')), 1)
 
 
         # request resurrect
@@ -607,7 +627,7 @@ class ResurrectTests(DraftFileMixin, TestCase):
         r = self.client.get(url)
         self.assertEqual(r.status_code, 200)
         q = PyQuery(r.content)
-        self.assertEqual(len(q('form [type=submit]')), 1)
+        self.assertEqual(len(q('#content form [type=submit]')), 1)
 
         # complete resurrect
         events_before = draft.docevent_set.count()
@@ -722,10 +742,6 @@ class ExpireIDsTests(DraftFileMixin, TestCase):
 
         self.assertEqual(len(list(get_expired_drafts())), 1)
 
-        draft.set_state(State.objects.get(used=True, type="draft-iesg", slug="watching"))
-
-        self.assertEqual(len(list(get_expired_drafts())), 1)
-
         draft.set_state(State.objects.get(used=True, type="draft-iesg", slug="iesg-eva"))
 
         self.assertEqual(len(list(get_expired_drafts())), 0)
@@ -747,13 +763,16 @@ class ExpireIDsTests(DraftFileMixin, TestCase):
         txt = "%s-%s.txt" % (draft.name, draft.rev)
         self.write_draft_file(txt, 5000)
 
+        self.assertFalse(expirable_drafts(Document.objects.filter(pk=draft.pk)).exists())
+        draft.set_state(State.objects.get(used=True, type="draft-iesg", slug="idexists"))
+        self.assertTrue(expirable_drafts(Document.objects.filter(pk=draft.pk)).exists())
         expire_draft(draft)
 
         draft = Document.objects.get(name=draft.name)
         self.assertEqual(draft.get_state_slug(), "expired")
-        self.assertEqual(draft.get_state_slug("draft-iesg"), "dead")
+        self.assertEqual(draft.get_state_slug("draft-iesg"), "idexists")
         self.assertTrue(draft.latest_event(type="expired_document"))
-        self.assertCountEqual(draft.action_holders.all(), [])
+        self.assertEqual(draft.action_holders.count(), 0)
         self.assertIn('Removed all action holders', draft.latest_event(type='changed_action_holders').desc)
         self.assertTrue(not os.path.exists(os.path.join(settings.INTERNET_DRAFT_PATH, txt)))
         self.assertTrue(os.path.exists(os.path.join(settings.INTERNET_DRAFT_ARCHIVE_DIR, txt)))
@@ -907,6 +926,7 @@ class IndividualInfoFormsTests(TestCase):
         super().setUp()
         doc = WgDraftFactory(group__acronym='mars',shepherd=PersonFactory(user__username='plain',name='Plain Man').email_set.first())
         self.docname = doc.name
+        self.doc_group = doc.group
 
     def test_doc_change_stream(self):
         url = urlreverse('ietf.doc.views_draft.change_stream', kwargs=dict(name=self.docname))
@@ -1023,23 +1043,6 @@ class IndividualInfoFormsTests(TestCase):
         doc = Document.objects.get(name=self.docname)
         self.assertEqual(doc.latest_event(TelechatDocEvent, "scheduled_for_telechat").telechat_date,None)
         
-    def test_doc_change_iesg_note(self):
-        url = urlreverse('ietf.doc.views_draft.edit_iesg_note', kwargs=dict(name=self.docname))
-        login_testing_unauthorized(self, "secretary", url)
-
-        # get
-        r = self.client.get(url)
-        self.assertEqual(r.status_code,200)
-        q = PyQuery(r.content)
-        self.assertEqual(len(q('[type=submit]:contains("Save")')),1)
-
-        # post
-        r = self.client.post(url,dict(note='ZpyQFGmA\r\nZpyQFGmA'))
-        self.assertEqual(r.status_code,302)
-        doc = Document.objects.get(name=self.docname)
-        self.assertEqual(doc.note,'ZpyQFGmA\nZpyQFGmA')
-        self.assertTrue('ZpyQFGmA' in doc.latest_event(DocEvent,type='added_comment').desc)
-
     def test_doc_change_ad(self):
         url = urlreverse('ietf.doc.views_draft.edit_ad', kwargs=dict(name=self.docname))
         login_testing_unauthorized(self, "secretary", url)
@@ -1308,8 +1311,10 @@ class IndividualInfoFormsTests(TestCase):
         RoleFactory(name_id='techadv', person=PersonFactory(), group=doc.group)
         RoleFactory(name_id='editor', person=PersonFactory(), group=doc.group)
         RoleFactory(name_id='secr', person=PersonFactory(), group=doc.group)
-        
+        some_other_chair = RoleFactory(name_id="chair").person
+
         url = urlreverse('ietf.doc.views_doc.edit_action_holders', kwargs=dict(name=doc.name))
+        login_testing_unauthorized(self, some_other_chair.user.username, url)  # other chair can't edit action holders
         login_testing_unauthorized(self, username, url)
         
         r = self.client.get(url)
@@ -1352,6 +1357,14 @@ class IndividualInfoFormsTests(TestCase):
         _test_changing_ah(doc.authors(), 'authors can do it, too')
         _test_changing_ah([], 'clear it back out')
 
+    def test_doc_change_action_holders_as_doc_manager(self):
+        # create a test RoleName and put it in the docman_roles for the document group
+        RoleName.objects.create(slug="wrangler", name="Wrangler", used=True)
+        self.doc_group.features.docman_roles.append("wrangler")
+        self.doc_group.features.save()
+        wrangler = RoleFactory(group=self.doc_group, name_id="wrangler").person
+        self.do_doc_change_action_holders_test(wrangler.user.username)
+
     def test_doc_change_action_holders_as_secretary(self):
         self.do_doc_change_action_holders_test('secretary')
 
@@ -1361,9 +1374,11 @@ class IndividualInfoFormsTests(TestCase):
     def do_doc_remind_action_holders_test(self, username):
         doc = Document.objects.get(name=self.docname)
         doc.action_holders.set(PersonFactory.create_batch(3))
-        
+        some_other_chair = RoleFactory(name_id="chair").person
+    
         url = urlreverse('ietf.doc.views_doc.remind_action_holders', kwargs=dict(name=doc.name))
         
+        login_testing_unauthorized(self, some_other_chair.user.username, url)  # other chair can't send reminder
         login_testing_unauthorized(self, username, url)
         r = self.client.get(url)
         self.assertEqual(r.status_code, 200)
@@ -1389,6 +1404,14 @@ class IndividualInfoFormsTests(TestCase):
         doc.action_holders.clear()
         self.client.post(url)
         self.assertEqual(len(outbox), 1)  # still 1
+
+    def test_doc_remind_action_holders_as_doc_manager(self):
+        # create a test RoleName and put it in the docman_roles for the document group
+        RoleName.objects.create(slug="wrangler", name="Wrangler", used=True)
+        self.doc_group.features.docman_roles.append("wrangler")
+        self.doc_group.features.save()
+        wrangler = RoleFactory(group=self.doc_group, name_id="wrangler").person
+        self.do_doc_remind_action_holders_test(wrangler.user.username)
 
     def test_doc_remind_action_holders_as_ad(self):
         self.do_doc_remind_action_holders_test('ad')
@@ -1466,6 +1489,42 @@ class SubmitToIesgTests(TestCase):
         self.assertEqual(new_docevent_type_count['changed_state'],2)
         self.assertEqual(new_docevent_type_count['started_iesg_process'],1)
         self.assertEqual(new_docevent_type_count['changed_action_holders'], 1)
+
+        self.assertEqual(len(outbox), mailbox_before + 1)
+        self.assertTrue("Publication has been requested" in outbox[-1]['Subject'])
+        self.assertTrue("aread@" in outbox[-1]['To'])
+        self.assertTrue("iesg-secretary@" in outbox[-1]['Cc'])
+
+    def test_confirm_submission_no_doc_ad(self):
+        url = urlreverse('ietf.doc.views_draft.to_iesg', kwargs=dict(name=self.docname))
+        self.client.login(username="marschairman", password="marschairman+password")
+
+        doc = Document.objects.get(name=self.docname)
+        RoleFactory(name_id='ad', group=doc.group, person=doc.ad)
+        e = DocEvent(type="changed_document", by=doc.ad, doc=doc, rev=doc.rev, desc="Remove doc AD")
+        e.save()
+        doc.ad = None
+        doc.save_with_history([e])
+
+        docevents_pre = set(doc.docevent_set.all())
+        mailbox_before = len(outbox)
+
+        r = self.client.post(url, dict(confirm="1"))
+        self.assertEqual(r.status_code, 302)
+
+        doc = Document.objects.get(name=self.docname)
+        self.assertTrue(doc.get_state('draft-iesg').slug=='pub-req')
+        self.assertTrue(doc.get_state('draft-stream-ietf').slug=='sub-pub')
+
+        self.assertCountEqual(doc.action_holders.all(), [doc.ad])
+
+        new_docevents = set(doc.docevent_set.all()) - docevents_pre
+        self.assertEqual(len(new_docevents), 5)
+        new_docevent_type_count = Counter([e.type for e in new_docevents])
+        self.assertEqual(new_docevent_type_count['changed_state'],2)
+        self.assertEqual(new_docevent_type_count['started_iesg_process'],1)
+        self.assertEqual(new_docevent_type_count['changed_action_holders'], 1)
+        self.assertEqual(new_docevent_type_count['changed_document'], 1)
 
         self.assertEqual(len(outbox), mailbox_before + 1)
         self.assertTrue("Publication has been requested" in outbox[-1]['Subject'])
@@ -1598,84 +1657,206 @@ class ReleaseDraftTests(TestCase):
 
 class AdoptDraftTests(TestCase):
     def test_adopt_document(self):
-        RoleFactory(group__acronym='mars',group__list_email='mars-wg@ietf.org',person__user__username='marschairman',name_id='chair')
-        draft = IndividualDraftFactory(name='draft-ietf-mars-test',notify='aliens@example.mars')
+        stream_state_type_slug = {
+            "wg": "draft-stream-ietf",
+            "ag": "draft-stream-ietf",
+            "rg": "draft-stream-irtf",
+            "rag": "draft-stream-irtf",
+            "edwg": "draft-stream-editorial",
+        }
+        for type_id in ("wg", "ag", "rg", "rag", "edwg"):
+            chair_role = RoleFactory(group__type_id=type_id,name_id='chair')
+            draft = IndividualDraftFactory(notify=f'{type_id}group@example.mars')
 
-        url = urlreverse('ietf.doc.views_draft.adopt_draft', kwargs=dict(name=draft.name))
-        login_testing_unauthorized(self, "marschairman", url)
-        
-        # get
-        r = self.client.get(url)
-        self.assertEqual(r.status_code, 200)
-        q = PyQuery(r.content)
-        self.assertEqual(len(q('form select[name="group"] option')), 1) # we can only select "mars"
+            url = urlreverse('ietf.doc.views_draft.adopt_draft', kwargs=dict(name=draft.name))
+            self.client.logout()
+            login_testing_unauthorized(self, chair_role.person.user.username, url)
 
-        # adopt in mars WG
-        mailbox_before = len(outbox)
-        events_before = draft.docevent_set.count()
-        mars = Group.objects.get(acronym="mars")
-        call_issued = State.objects.get(type='draft-stream-ietf',slug='c-adopt')
-        r = self.client.post(url,
-                             dict(comment="some comment",
-                                  group=mars.pk,
-                                  newstate=call_issued.pk,
-                                  weeks="10"))
-        self.assertEqual(r.status_code, 302)
+            # get
+            r = self.client.get(url)
+            self.assertEqual(r.status_code, 200)
 
-        draft = Document.objects.get(pk=draft.pk)
-        self.assertEqual(draft.group.acronym, "mars")
-        self.assertEqual(draft.stream_id, "ietf")
-        self.assertEqual(draft.docevent_set.count() - events_before, 5)
-        self.assertEqual(draft.notify,"aliens@example.mars")
-        self.assertEqual(len(outbox), mailbox_before + 1)
-        self.assertTrue("Call For Adoption" in outbox[-1]["Subject"])
-        self.assertTrue("mars-chairs@ietf.org" in outbox[-1]['To'])
-        self.assertTrue("draft-ietf-mars-test@" in outbox[-1]['To'])
-        self.assertTrue("mars-wg@" in outbox[-1]['To'])
+            # call for adoption
+            group_type_can_call_for_adoption = State.objects.filter(type_id=stream_state_type_slug[type_id],slug="c-adopt").exists()
+            if group_type_can_call_for_adoption:
+                empty_outbox()
+                events_before = draft.docevent_set.count()
+                call_issued = State.objects.get(type=stream_state_type_slug[type_id],slug='c-adopt')
+                r = self.client.post(url,
+                                    dict(comment="some comment",
+                                        group=chair_role.group.pk,
+                                        newstate=call_issued.pk,
+                                        weeks="10"))
+                self.assertEqual(r.status_code, 302)
 
-        self.assertFalse(mars.list_email in draft.notify)
+                draft = Document.objects.get(pk=draft.pk)
+                self.assertEqual(draft.get_state_slug(stream_state_type_slug[type_id]), "c-adopt")
+                self.assertEqual(draft.group, chair_role.group)
+                self.assertEqual(draft.stream_id, stream_state_type_slug[type_id][13:]) # trim off "draft-stream-"
+                self.assertEqual(draft.docevent_set.count() - events_before, 5)
+                self.assertEqual(len(outbox), 1)
+                self.assertTrue("Call For Adoption" in outbox[-1]["Subject"])
+                self.assertTrue(f"{chair_role.group.acronym}-chairs@" in outbox[-1]['To'])
+                self.assertTrue(f"{draft.name}@" in outbox[-1]['To'])
+                self.assertTrue(f"{chair_role.group.acronym}@" in outbox[-1]['To'])
 
-    def test_right_state_choices_offered(self):
-        draft = IndividualDraftFactory()
-        wg = GroupFactory(type_id='wg',state_id='active')
-        rg = GroupFactory(type_id='rg',state_id='active')
-        person = PersonFactory(user__username='person')
+            # adopt
+            empty_outbox()
+            events_before = draft.docevent_set.count()
+            # There are several possible states that a stream can adopt into - we will only test one per stream
+            stream_adopt_state_slug =  "wg-doc" if type_id in ("wg", "ag") else "active"
+            stream_adopt_state = State.objects.get(type=stream_state_type_slug[type_id],slug=stream_adopt_state_slug)
+            r = self.client.post(url,
+                                dict(comment="some comment",
+                                    group=chair_role.group.pk,
+                                    newstate=stream_adopt_state.pk,
+                                    weeks="10"))
+            self.assertEqual(r.status_code, 302)
 
-        self.client.login(username='person',password='person+password')
-        url = urlreverse('ietf.doc.views_draft.adopt_draft', kwargs=dict(name=draft.name))
+            draft = Document.objects.get(pk=draft.pk)
+            self.assertEqual(draft.get_state_slug(stream_state_type_slug[type_id]), stream_adopt_state_slug)
+            self.assertEqual(draft.group, chair_role.group)
+            self.assertEqual(draft.stream_id, stream_state_type_slug[type_id][13:]) # trim off "draft-stream-"
+            if type_id in ("wg", "ag"):
+                self.assertEqual(
+                    Counter(list(draft.docevent_set.values_list('type',flat=True))[events_before:]),
+                    Counter({'changed_group': 1, 'changed_stream': 1, 'new_revision': 1})
+                )
+            else:
+                self.assertEqual(
+                    Counter(list(draft.docevent_set.values_list('type',flat=True))[events_before:]),
+                    Counter({'changed_state': 1, 'added_comment': 1, 'changed_group': 1, 'changed_document': 1, 'changed_stream': 1, 'new_revision': 1})
+                )
+            self.assertEqual(len(outbox), 1 if type_id in ["wg", "ag"] else 2)
+            self.assertTrue(stream_adopt_state.name in outbox[-1]["Subject"])
+            self.assertTrue(f"{chair_role.group.acronym}-chairs@" in outbox[-1]['To'])
+            self.assertTrue(f"{draft.name}@" in outbox[-1]['To'])
+            self.assertTrue(f"{chair_role.group.acronym}@" in outbox[-1]['To'])
+            if type_id not in ["wg", "ag"]:
+                self.assertTrue(outbox[-2]["Subject"].endswith("to Informational"))
+                # recipient fields tested elsewhere
 
-        person.role_set.create(name_id='chair',group=wg,email=person.email())
-        r = self.client.get(url)
-        q = PyQuery(r.content)
-        self.assertTrue('(IETF)' in q('#id_newstate option').text())
-        self.assertFalse('(IRTF)' in q('#id_newstate option').text())
 
-        person.role_set.create(name_id='chair',group=Group.objects.get(acronym='irtf'),email=person.email())
-        r = self.client.get(url)
-        q = PyQuery(r.content)
-        self.assertTrue('(IETF)' in q('#id_newstate option').text())
-        self.assertTrue('(IRTF)' in q('#id_newstate option').text())
+class AdoptDraftFormTests(TestCase):
+    def setUp(self):
+        super().setUp()
+        # test_data.py made a WG already, and made all the GroupFeatures
+        # This will detect changes in that assumption
+        self.chair_roles = {
+            "wg": Group.objects.filter(
+                type__features__acts_like_wg=True, state="active"
+            )
+            .get()
+            .role_set.get(name_id="chair")
+        }
+        # This set of tests currently assumes all document adopting group types have "chair" in thier docman roles,
+        # and only tests that the form acts correctly for chairs. It should be expanded to use all the roles it finds
+        # in the group of docman roles (which comes from the production database by way of ietf/name/fixtures/names.json)
+        for type_id in ["ag", "rg", "rag", "edwg"]:
+            self.chair_roles[type_id] = RoleFactory(
+                group__type_id=type_id, name_id="chair"
+            )
 
-        person.role_set.filter(group__acronym='irtf').delete()
-        person.role_set.create(name_id='chair',group=rg,email=person.email())
-        r = self.client.get(url)
-        q = PyQuery(r.content)
-        self.assertTrue('(IETF)' in q('#id_newstate option').text())
-        self.assertTrue('(IRTF)' in q('#id_newstate option').text())
+    def test_form_init(self):
+        secretariat = Person.objects.get(user__username="secretary")
+        f = AdoptDraftForm(user=secretariat.user)
+        form_offers_groups = f.fields["group"].queryset
+        self.assertEqual(
+            set(form_offers_groups.all()),
+            set(
+                Group.objects.filter(type__features__acts_like_wg=True, state="active")
+            ),
+        )
+        self.assertEqual(form_offers_groups.count(), 5)
+        form_offers_states = State.objects.filter(
+            pk__in=[t[0] for t in f.fields["newstate"].choices[1:]]
+        )
+        self.assertEqual(
+            Counter(form_offers_states.values_list("type_id", flat=True)),
+            Counter(
+                {
+                    "draft-stream-irtf": 14,
+                    "draft-stream-ietf": 12,
+                    "draft-stream-editorial": 5,
+                }
+            ),
+        )
 
-        person.role_set.filter(group=wg).delete()
-        r = self.client.get(url)
-        q = PyQuery(r.content)
-        self.assertFalse('(IETF)' in q('#id_newstate option').text())
-        self.assertTrue('(IRTF)' in q('#id_newstate option').text())
+        irtf_chair = Person.objects.get(user__username="irtf-chair")
+        f = AdoptDraftForm(user=irtf_chair.user)
+        form_offers_groups = f.fields["group"].queryset
+        self.assertEqual(
+            set(form_offers_groups.all()),
+            set(Group.objects.filter(type_id__in=("rag", "rg"), state="active")),
+        )
+        self.assertEqual(form_offers_groups.count(), 2)
+        form_offers_states = State.objects.filter(
+            pk__in=[t[0] for t in f.fields["newstate"].choices[1:]]
+        )
+        self.assertEqual(
+            set(form_offers_states.values_list("type_id", flat=True)),
+            set(["draft-stream-irtf"]),
+        )
 
-        person.role_set.all().delete()
-        person.role_set.create(name_id='secr',group=Group.objects.get(acronym='secretariat'),email=person.email())
-        r = self.client.get(url)
-        q = PyQuery(r.content)
-        self.assertTrue('(IETF)' in q('#id_newstate option').text())
-        self.assertTrue('(IRTF)' in q('#id_newstate option').text())
+        stream_state_type_slug = {
+            "wg": "draft-stream-ietf",
+            "ag": "draft-stream-ietf",
+            "rg": "draft-stream-irtf",
+            "rag": "draft-stream-irtf",
+            "edwg": "draft-stream-editorial",
+        }
+        for type_id in self.chair_roles:
+            f = AdoptDraftForm(user=self.chair_roles[type_id].person.user)
+            form_offers_groups = f.fields["group"].queryset
+            self.assertEqual(form_offers_groups.get(), self.chair_roles[type_id].group)
+            form_offers_states = State.objects.filter(
+                pk__in=[t[0] for t in f.fields["newstate"].choices[1:]]
+            )
+            self.assertEqual(
+                set(form_offers_states.values_list("type_id", flat=True)),
+                set([stream_state_type_slug[type_id]]),
+            )
 
+        edwgchair_role = self.chair_roles["edwg"]
+        RoleFactory(group__type_id="wg", person=edwgchair_role.person, name_id="chair")
+        RoleFactory(group__type_id="rg", person=edwgchair_role.person, name_id="chair")
+        f = AdoptDraftForm(user=edwgchair_role.person.user)
+        form_offers_groups = f.fields["group"].queryset
+        self.assertEqual(
+            set(form_offers_groups.values_list("type_id", flat=True)),
+            set(["edwg", "wg", "rg"]),
+        )
+        self.assertEqual(form_offers_groups.count(), 3)
+        form_offers_states = State.objects.filter(
+            pk__in=[t[0] for t in f.fields["newstate"].choices[1:]]
+        )
+        self.assertEqual(
+            set(form_offers_states.values_list("type_id", flat=True)),
+            set(["draft-stream-irtf", "draft-stream-ietf", "draft-stream-editorial"]),
+        )
+
+        also_chairs_wg = RoleFactory(
+            group__type_id="wg", person=irtf_chair, name_id="chair"
+        )
+        f = AdoptDraftForm(user=irtf_chair.user)
+        form_offers_groups = f.fields["group"].queryset
+        self.assertEqual(
+            set(form_offers_groups.all()),
+            set(
+                Group.objects.filter(
+                    Q(type_id__in=("rag", "rg")) | Q(pk=also_chairs_wg.group.pk),
+                    state="active",
+                )
+            ),
+        )
+        self.assertEqual(form_offers_groups.count(), 4)
+        form_offers_states = State.objects.filter(
+            pk__in=[t[0] for t in f.fields["newstate"].choices[1:]]
+        )
+        self.assertEqual(
+            set(form_offers_states.values_list("type_id", flat=True)),
+            set(["draft-stream-irtf", "draft-stream-ietf"]),
+        )
 
 class ChangeStreamStateTests(TestCase):
     def test_set_tags(self):
@@ -1749,8 +1930,11 @@ class ChangeStreamStateTests(TestCase):
         self.assertEqual(draft.docevent_set.count() - events_before, 2)
         reminder = DocReminder.objects.filter(event__doc=draft, type="stream-s")
         self.assertEqual(len(reminder), 1)
-        due = timezone.now() + datetime.timedelta(weeks=10)
-        self.assertTrue(due - datetime.timedelta(days=1) <= reminder[0].due <= due + datetime.timedelta(days=1))
+        due = timezone.now().astimezone(DEADLINE_TZINFO) + datetime.timedelta(weeks=10)
+        self.assertTrue(
+            due - datetime.timedelta(days=1) <= reminder[0].due <= due + datetime.timedelta(days=1),
+            f'Due date {reminder[0].due} should be {due} +/- 1 day'
+        )
         self.assertEqual(len(outbox), 1)
         self.assertTrue("state changed" in outbox[0]["Subject"].lower())
         self.assertTrue("mars-chairs@ietf.org" in outbox[0].as_string())
@@ -1794,8 +1978,11 @@ class ChangeStreamStateTests(TestCase):
         self.assertEqual(draft.docevent_set.count() - events_before, 2)
         reminder = DocReminder.objects.filter(event__doc=draft, type="stream-s")
         self.assertEqual(len(reminder), 1)
-        due = timezone.now() + datetime.timedelta(weeks=10)
-        self.assertTrue(due - datetime.timedelta(days=1) <= reminder[0].due <= due + datetime.timedelta(days=1))
+        due = timezone.now().astimezone(DEADLINE_TZINFO) + datetime.timedelta(weeks=10)
+        self.assertTrue(
+            due - datetime.timedelta(days=1) <= reminder[0].due <= due + datetime.timedelta(days=1),
+            f'Due date {reminder[0].due} should be {due} +/- 1 day'
+        )
         self.assertEqual(len(outbox), 1)
         self.assertTrue("state changed" in outbox[0]["Subject"].lower())
         self.assertTrue("mars-chairs@ietf.org" in outbox[0].as_string())
@@ -1887,7 +2074,7 @@ class ChangeReplacesTests(TestCase):
         
         # Post that says replacea replaces base a
         empty_outbox()
-        RelatedDocument.objects.create(source=self.replacea, target=self.basea.docalias.first(),
+        RelatedDocument.objects.create(source=self.replacea, target=self.basea,
                                        relationship=DocRelationshipName.objects.get(slug="possibly-replaces"))
         self.assertEqual(self.basea.get_state().slug,'active')
         r = self.client.post(url, dict(replaces=self.basea.pk))
@@ -1935,7 +2122,7 @@ class ChangeReplacesTests(TestCase):
 
 
     def test_review_possibly_replaces(self):
-        replaced = self.basea.docalias.first()
+        replaced = self.basea
         RelatedDocument.objects.create(source=self.replacea, target=replaced,
                                        relationship=DocRelationshipName.objects.get(slug="possibly-replaces"))
 
@@ -1986,3 +2173,13 @@ class ShepherdWriteupTests(TestCase):
         self.assertContains(r, "for Group Documents", status_code=200)
         r = self.client.post(url,dict(reset_text=''))
         self.assertContains(r, "for Group Documents", status_code=200)
+
+class EditorialDraftMetadataTests(TestCase):
+    def test_editorial_metadata(self):
+        draft = EditorialDraftFactory()
+        url = urlreverse("ietf.doc.views_doc.document_main", kwargs=dict(name=draft.name))
+        r = self.client.get(url)
+        q = PyQuery(r.content)
+        top_level_metadata_headings = q("tbody>tr>th:first-child").text()
+        self.assertNotIn("IESG", top_level_metadata_headings)
+        self.assertNotIn("IANA", top_level_metadata_headings)

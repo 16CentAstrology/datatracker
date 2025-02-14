@@ -3,6 +3,7 @@
 
 
 from django import forms
+from django.template.defaultfilters import pluralize
 
 import debug                            # pyflakes:ignore
 
@@ -12,6 +13,7 @@ from ietf.meeting.forms import sessiondetailsformset_factory
 from ietf.meeting.models import ResourceAssociation, Constraint
 from ietf.person.fields import SearchablePersonsField
 from ietf.person.models import Person
+from ietf.utils.fields import ModelMultipleChoiceField
 from ietf.utils.html import clean_text_field
 from ietf.utils import log
 
@@ -27,7 +29,7 @@ JOINT_FOR_SESSION_CHOICES = (('1', 'First session'), ('2', 'Second session'), ('
 # Helper Functions
 # -------------------------------------------------
 def allowed_conflicting_groups():
-    return Group.objects.filter(type__in=['wg', 'ag', 'rg', 'rag', 'program'], state__in=['bof', 'proposed', 'active'])
+    return Group.objects.filter(type__in=['wg', 'ag', 'rg', 'rag', 'program', 'edwg'], state__in=['bof', 'proposed', 'active'])
 
 def check_conflict(groups, source_group):
     '''
@@ -56,7 +58,7 @@ class GroupSelectForm(forms.Form):
         self.fields['group'].widget.choices = choices
 
 
-class NameModelMultipleChoiceField(forms.ModelMultipleChoiceField):
+class NameModelMultipleChoiceField(ModelMultipleChoiceField):
     def label_from_instance(self, name):
         return name.desc
 
@@ -80,17 +82,18 @@ class SessionForm(forms.Form):
     timeranges    = NameModelMultipleChoiceField(widget=forms.CheckboxSelectMultiple, required=False,
                                                  queryset=TimerangeName.objects.all())
     adjacent_with_wg = forms.ChoiceField(required=False)
+    send_notifications = forms.BooleanField(label="Send notification emails?", required=False, initial=False)
 
     def __init__(self, group, meeting, data=None, *args, **kwargs):
-        if 'hidden' in kwargs:
-            self.hidden = kwargs.pop('hidden')
-        else:
-            self.hidden = False
+        self.hidden = kwargs.pop('hidden', False)
+        self.notifications_optional = kwargs.pop('notifications_optional', False)
 
         self.group = group
         formset_class = sessiondetailsformset_factory(max_num=3 if group.features.acts_like_wg else 50)
         self.session_forms = formset_class(group=self.group, meeting=meeting, data=data)
         super(SessionForm, self).__init__(data=data, *args, **kwargs)
+        if not self.notifications_optional:
+            self.fields['send_notifications'].widget = forms.HiddenInput()
 
         # Allow additional sessions for non-wg-like groups
         if not self.group.features.acts_like_wg:
@@ -157,7 +160,7 @@ class SessionForm(forms.Form):
             self.fields['resources'].widget = forms.MultipleHiddenInput()
             self.fields['timeranges'].widget = forms.MultipleHiddenInput()
             # and entirely replace bethere - no need to support searching if input is hidden
-            self.fields['bethere'] = forms.ModelMultipleChoiceField(
+            self.fields['bethere'] = ModelMultipleChoiceField(
                 widget=forms.MultipleHiddenInput, required=False,
                 queryset=Person.objects.all(),
             )
@@ -233,6 +236,28 @@ class SessionForm(forms.Form):
 
     def clean_comments(self):
         return clean_text_field(self.cleaned_data['comments'])
+
+    def clean_bethere(self):
+        bethere = self.cleaned_data["bethere"]
+        if bethere:
+            extra = set(
+                Person.objects.filter(
+                    role__group=self.group, role__name__in=["chair", "ad"]
+                )
+                & bethere
+            )
+            if extra:
+                extras = ", ".join(e.name for e in extra)
+                raise forms.ValidationError(
+                    (
+                        f"Please remove the following person{pluralize(len(extra))}, the system "
+                        f"tracks their availability due to their role{pluralize(len(extra))}: {extras}."
+                    )
+                )
+        return bethere
+
+    def clean_send_notifications(self):
+        return True if not self.notifications_optional else self.cleaned_data['send_notifications']
 
     def is_valid(self):
         return super().is_valid() and self.session_forms.is_valid()

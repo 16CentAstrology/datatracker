@@ -1,17 +1,18 @@
-# Copyright The IETF Trust 2011-2022, All Rights Reserved
+# Copyright The IETF Trust 2011-2023, All Rights Reserved
 # -*- coding: utf-8 -*-
 
 
 import datetime
 import email
 import io
+import mock
 import os
 import re
 import sys
-import mock
 
 from io import StringIO
 from pyquery import PyQuery
+from typing import Tuple
 
 from pathlib import Path
 
@@ -23,15 +24,12 @@ from django.test import override_settings
 from django.test.client import RequestFactory
 from django.urls import reverse as urlreverse
 from django.utils import timezone
-from django.utils.encoding import force_str, force_text
+from django.utils.encoding import force_str
 import debug                            # pyflakes:ignore
 
-from ietf.submit.utils import (expirable_submissions, expire_submission, find_submission_filenames,
-                               post_submission, validate_submission_name, validate_submission_rev,
-                               process_uploaded_submission, SubmissionError, process_submission_text)
-from ietf.doc.factories import (DocumentFactory, WgDraftFactory, IndividualDraftFactory, IndividualRfcFactory,
+from ietf.doc.factories import (DocumentFactory, WgDraftFactory, IndividualDraftFactory,
                                 ReviewFactory, WgRfcFactory)
-from ietf.doc.models import ( Document, DocAlias, DocEvent, State,
+from ietf.doc.models import ( Document, DocEvent, State,
     BallotPositionDocEvent, DocumentAuthor, SubmissionDocEvent )
 from ietf.doc.utils import create_ballot_if_not_open, can_edit_docextresources, update_action_holders
 from ietf.group.factories import GroupFactory, RoleFactory
@@ -39,18 +37,22 @@ from ietf.group.models import Group
 from ietf.group.utils import setup_default_community_list_for_group
 from ietf.meeting.models import Meeting
 from ietf.meeting.factories import MeetingFactory
-from ietf.message.models import Message
-from ietf.name.models import FormalLanguageName
+from ietf.name.models import DraftSubmissionStateName, FormalLanguageName
 from ietf.person.models import Person
-from ietf.person.factories import UserFactory, PersonFactory, EmailFactory
+from ietf.person.factories import UserFactory, PersonFactory
 from ietf.submit.factories import SubmissionFactory, SubmissionExtResourceFactory
 from ietf.submit.forms import SubmissionBaseUploadForm, SubmissionAutoUploadForm
 from ietf.submit.models import Submission, Preapproval, SubmissionExtResource
-from ietf.submit.mail import add_submission_email, process_response_email
-from ietf.submit.tasks import cancel_stale_submissions, process_uploaded_submission_task
+from ietf.submit.tasks import cancel_stale_submissions, process_and_accept_uploaded_submission_task
+from ietf.submit.utils import (expirable_submissions, expire_submission, find_submission_filenames,
+                               post_submission, validate_submission_name, validate_submission_rev,
+                               process_and_accept_uploaded_submission, SubmissionError, process_submission_text,
+                               process_submission_xml, process_uploaded_submission, 
+                               process_and_validate_submission, apply_yang_checker_to_draft, 
+                               run_all_yang_model_checks)
+from ietf.utils import tool_version
 from ietf.utils.accesstoken import generate_access_token
-from ietf.utils.mail import outbox, empty_outbox, get_payload_text
-from ietf.utils.models import VersionInfo
+from ietf.utils.mail import outbox, get_payload_text
 from ietf.utils.test_utils import login_testing_unauthorized, TestCase
 from ietf.utils.timezone import date_today
 from ietf.utils.draft import PlaintextDraft
@@ -91,7 +93,28 @@ class BaseSubmitTestCase(TestCase):
     def archive_dir(self):
         return settings.INTERNET_DRAFT_ARCHIVE_DIR
 
-def submission_file(name_in_doc, name_in_post, group, templatename, author=None, email=None, title=None, year=None, ascii=True):
+    def post_to_upload_submission(self, *args, **kwargs):
+        """POST to the upload_submission endpoint
+        
+        Use this instead of directly POSTing to be sure that the appropriate celery
+        tasks would be queued (but are not actually queued during testing)
+        """
+        # Mock task so we can check that it's called without actually submitting a celery task.
+        # Also mock on_commit() because otherwise the test transaction prevents the call from
+        # ever being made.
+        with mock.patch("ietf.submit.views.process_uploaded_submission_task") as mocked_task:
+            with mock.patch("ietf.submit.views.transaction.on_commit", side_effect=lambda x: x()):
+                response = self.client.post(*args, **kwargs)
+        if response.status_code == 302:
+            # A 302 indicates we're being redirected to the status page, meaning the upload
+            # was accepted. Check that the task would have been queued.
+            self.assertTrue(mocked_task.delay.called)
+        else:
+            self.assertFalse(mocked_task.delay.called)
+        return response
+
+
+def submission_file_contents(name_in_doc, group, templatename, author=None, email=None, title=None, year=None, ascii=True):
     _today = date_today()
     # construct appropriate text draft
     f = io.open(os.path.join(settings.BASE_DIR, "submit", templatename))
@@ -128,9 +151,17 @@ def submission_file(name_in_doc, name_in_post, group, templatename, author=None,
             email=email,
             title=title,
     )
+    return submission_text, author
+
+
+def submission_file(name_in_doc, name_in_post, group, templatename, author=None, email=None, title=None, year=None, ascii=True):
+    submission_text, author = submission_file_contents(
+        name_in_doc, group, templatename, author, email, title, year, ascii
+    )
     file = StringIO(submission_text)
     file.name = name_in_post
     return file, author
+
 
 def create_draft_submission_with_rev_mismatch(rev='01'):
     """Create a draft and submission with mismatched version
@@ -166,37 +197,73 @@ def create_draft_submission_with_rev_mismatch(rev='01'):
     return draft, sub
 
 
+class ManualSubmissionTests(TestCase):
+    def test_manualpost_view(self):
+        submission = SubmissionFactory(state_id="manual")
+        url = urlreverse("ietf.submit.views.manualpost")
+        r = self.client.get(url)
+        self.assertEqual(r.status_code, 200)
+        q = PyQuery(r.content)
+        self.assertIn(
+            urlreverse(
+                "ietf.submit.views.submission_status", 
+                kwargs=dict(submission_id=submission.pk)
+            ),
+            q("#manual.submissions td a").attr("href")
+        )
+        self.assertIn(
+            submission.name,
+            q("#manual.submissions td a").text()
+        )
+
+    def test_manualpost_cancel(self):
+        pass
+
 class SubmitTests(BaseSubmitTestCase):
     def setUp(self):
         super().setUp()
+        (Path(settings.FTP_DIR) / "internet-drafts").mkdir()
         # Submit views assume there is a "next" IETF to look for cutoff dates against
         MeetingFactory(type_id='ietf', date=date_today()+datetime.timedelta(days=180))
 
-    def create_and_post_submission(self, name, rev, author, group=None, formats=("txt",), base_filename=None):
+    def create_and_post_submission(self, name, rev, author, group=None, formats=("txt",), base_filename=None, ascii=True):
         """Helper to create and post a submission
 
-        If base_filename is None, defaults to 'test_submission'
+        If base_filename is None, defaults to 'test_submission'.
         """
         url = urlreverse('ietf.submit.views.upload_submission')
         files = dict()
 
         for format in formats:
             fn = '.'.join((base_filename or 'test_submission', format))
-            files[format], __ = submission_file(f'{name}-{rev}', f'{name}-{rev}.{format}', group, fn, author=author)
+            files[format], __ = submission_file(f'{name}-{rev}', f'{name}-{rev}.{format}', group, fn, author=author, ascii=ascii)
 
-        r = self.client.post(url, files)
-        if r.status_code != 302:
+        r = self.post_to_upload_submission(url, files)
+        if r.status_code == 302:
+            # A redirect means the upload was accepted and queued for processing
+            process_submission = True
+            last_submission = Submission.objects.order_by("-pk").first()
+            self.assertEqual(last_submission.state_id, "validating")
+        else:
+            process_submission = False
             q = PyQuery(r.content)
             print(q('div.invalid-feedback').text())
         self.assertNoFormPostErrors(r, ".invalid-feedback,.alert-danger")
-
-        for format in formats:
-            self.assertTrue(os.path.exists(os.path.join(self.staging_dir, "%s-%s.%s" % (name, rev, format))))
-            if format == 'xml':
-                self.assertTrue(os.path.exists(os.path.join(self.staging_dir, "%s-%s.%s" % (name, rev, 'html'))))
+        
+        # Now process the submission like the task would do
+        if process_submission:
+            process_uploaded_submission(Submission.objects.order_by('-pk').first())
+            for format in formats:
+                self.assertTrue(os.path.exists(os.path.join(self.staging_dir, "%s-%s.%s" % (name, rev, format))))
+                if format == 'xml':
+                    self.assertTrue(os.path.exists(os.path.join(self.staging_dir, "%s-%s.%s" % (name, rev, 'html'))))
         return r
 
-    def do_submission(self, name, rev, group=None, formats=["txt",], author=None):
+    def do_submission(self, name, rev, group=None, formats: Tuple[str, ...]=("txt",), author=None, base_filename=None, ascii=True):
+        """Simulate uploading a draft and waiting for validation results
+        
+        Returns the "full access" status URL and the author associated with the submitted draft.
+        """
         # break early in case of missing configuration
         self.assertTrue(os.path.exists(settings.IDSUBMIT_IDNITS_BINARY))
 
@@ -211,7 +278,9 @@ class SubmitTests(BaseSubmitTestCase):
         # submit
         if author is None:
             author = PersonFactory()
-        r = self.create_and_post_submission(name, rev, author, group, formats)
+        r = self.create_and_post_submission(
+            name=name, rev=rev, author=author, group=group, formats=formats, base_filename=base_filename, ascii=ascii
+        )
         status_url = r["Location"]
 
         self.assertEqual(Submission.objects.filter(name=name).count(), 1)
@@ -223,8 +292,10 @@ class SubmitTests(BaseSubmitTestCase):
             sys.stderr.write("Author initials: %s\n" % author.initials())
         self.assertEqual(len(submission.authors), 1)
         a = submission.authors[0]
-        self.assertEqual(a["name"], author.ascii_name())
-        self.assertEqual(a["email"], author.email().address.lower())
+        if ascii:
+            self.assertEqual(a["name"], author.ascii_name())
+        if author.email():
+            self.assertEqual(a["email"], author.email().address.lower())
         self.assertEqual(a["affiliation"], "Test Centre Inc.")
         self.assertEqual(a["country"], "UK")
 
@@ -253,7 +324,7 @@ class SubmitTests(BaseSubmitTestCase):
             submission = Submission.objects.get(name=name)
             self.assertEqual(submission.submitter, email.utils.formataddr((submitter_name, submitter_email)))
             self.assertEqual([] if submission.replaces == "" else submission.replaces.split(','),
-                             [ d.name for d in DocAlias.objects.filter(pk__in=replaces) ])
+                             [ d.name for d in Document.objects.filter(pk__in=replaces) ])
             self.assertCountEqual(
                 [str(r) for r in submission.external_resources.all()],
                 [str(r) for r in extresources] if extresources else [],
@@ -306,11 +377,8 @@ class SubmitTests(BaseSubmitTestCase):
             ad=draft.ad,
             expires=timezone.now() + datetime.timedelta(days=settings.INTERNET_DRAFT_DAYS_TO_EXPIRE),
             notify="aliens@example.mars",
-            note="",
         )
         sug_replaced_draft.set_state(State.objects.get(used=True, type="draft", slug="active"))
-        sug_replaced_alias = DocAlias.objects.create(name=sug_replaced_draft.name)
-        sug_replaced_alias.docs.add(sug_replaced_draft)
 
         name = "draft-ietf-mars-testing-tests"
         rev = "00"
@@ -320,14 +388,13 @@ class SubmitTests(BaseSubmitTestCase):
 
         # supply submitter info, then draft should be in and ready for approval
         mailbox_before = len(outbox)
-        replaced_alias = draft.docalias.first()
         r = self.supply_extra_metadata(name, status_url, author.ascii, author.email().address.lower(),
-                                       replaces=[str(replaced_alias.pk), str(sug_replaced_alias.pk)])
+                                       replaces=[str(draft.pk), str(sug_replaced_draft.pk)])
 
         self.assertEqual(r.status_code, 302)
         status_url = r["Location"]
         self.assertEqual(len(outbox), mailbox_before + 1)
-        self.assertTrue("New draft waiting for approval" in outbox[-1]["Subject"])
+        self.assertTrue("New Internet-Draft waiting for approval" in outbox[-1]["Subject"])
         self.assertTrue(name in outbox[-1]["Subject"])
 
         # as chair of WG, we should see approval button
@@ -352,7 +419,7 @@ class SubmitTests(BaseSubmitTestCase):
         r = self.client.post(status_url, dict(action=action))
         self.assertEqual(r.status_code, 302)
 
-        draft = Document.objects.get(docalias__name=name)
+        draft = Document.objects.get(name=name)
         self.assertEqual(draft.rev, rev)
         new_revision = draft.latest_event(type="new_revision")
         self.assertEqual(draft.group.acronym, "mars")
@@ -370,9 +437,9 @@ class SubmitTests(BaseSubmitTestCase):
         self.assertEqual(authors[0].person, author)
         self.assertEqual(set(draft.formal_languages.all()), set(FormalLanguageName.objects.filter(slug="json")))
         self.assertEqual(draft.relations_that_doc("replaces").count(), 1)
-        self.assertTrue(draft.relations_that_doc("replaces").first().target, replaced_alias)
+        self.assertTrue(draft.relations_that_doc("replaces").first().target, draft)
         self.assertEqual(draft.relations_that_doc("possibly-replaces").count(), 1)
-        self.assertTrue(draft.relations_that_doc("possibly-replaces").first().target, sug_replaced_alias)
+        self.assertTrue(draft.relations_that_doc("possibly-replaces").first().target, sug_replaced_draft)
         self.assertEqual(len(outbox), mailbox_before + 5)
         self.assertIn(("I-D Action: %s" % name), outbox[-4]["Subject"])
         self.assertIn(author.ascii, get_payload_text(outbox[-4]))
@@ -385,7 +452,7 @@ class SubmitTests(BaseSubmitTestCase):
         # Check "Review of suggested possible replacements for..." mail
         self.assertIn("review", outbox[-1]["Subject"].lower())
         self.assertIn(name, get_payload_text(outbox[-1]))
-        self.assertIn(sug_replaced_alias.name, get_payload_text(outbox[-1]))
+        self.assertIn(sug_replaced_draft.name, get_payload_text(outbox[-1]))
         self.assertIn("ames-chairs@", outbox[-1]["To"].lower())
         self.assertIn("mars-chairs@", outbox[-1]["To"].lower())
         # Check submission settings
@@ -438,7 +505,7 @@ class SubmitTests(BaseSubmitTestCase):
 
         # Approval request notification should be sent to the WG chair
         self.assertEqual(len(outbox), mailbox_before + 1)
-        self.assertTrue("New draft waiting for approval" in outbox[-1]["Subject"])
+        self.assertTrue("New Internet-Draft waiting for approval" in outbox[-1]["Subject"])
         self.assertTrue(name in outbox[-1]["Subject"])
         self.assertTrue('mars-chairs@ietf.org' in outbox[-1]['To'])
 
@@ -446,6 +513,25 @@ class SubmitTests(BaseSubmitTestCase):
         r = self.client.get(status_url)
         self.assertEqual(r.status_code, 200)
         self.assertContains(r, 'The submission is pending approval by the group chairs.')
+
+    def test_submit_new_wg_as_author_bad_submitter(self):
+        # submit new -> supply submitter info -> approve
+        mars = GroupFactory(type_id='wg', acronym='mars')
+        draft = WgDraftFactory(group=mars)
+        setup_default_community_list_for_group(draft.group)
+
+        name = "draft-ietf-mars-testing-tests"
+        rev = "00"
+        group = "mars"
+
+        status_url, author = self.do_submission(name, rev, group)
+        username = author.user.email
+
+        # supply submitter info with MIME-encoded name
+        self.client.login(username=username, password=username+'+password')  # log in as the author
+        r = self.supply_extra_metadata(name, status_url, '=?utf-8?q?Peter_Christen_Asbj=C3=B8rnsen?=', author.email().address.lower(), replaces=[])
+        self.assertEqual(r.status_code, 200)
+        self.assertContains(r, 'appears to be a MIME-encoded string')
 
     def submit_new_concluded_wg_as_author(self, group_state_id='conclude'):
         """A new concluded WG submission by a logged-in author needs AD approval"""
@@ -636,7 +722,7 @@ class SubmitTests(BaseSubmitTestCase):
         self.assertTrue('New version approved' in edescs)
         self.assertTrue('Uploaded new revision' in edescs)
 
-        draft = Document.objects.get(docalias__name=name)
+        draft = Document.objects.get(name=name)
         self.assertEqual(draft.rev, rev)
         self.assertEqual(draft.group.acronym, name.split("-")[2])
         #
@@ -701,10 +787,10 @@ class SubmitTests(BaseSubmitTestCase):
         self.assertTrue("New Version Notification" in outbox[-2]["Subject"])
         self.assertTrue(name in get_payload_text(outbox[-2]))
         interesting_address = {'ietf':'mars', 'irtf':'irtf-chair', 'iab':'iab-chair', 'ise':'rfc-ise'}[draft.stream_id]
-        self.assertTrue(interesting_address in force_text(outbox[-2].as_string()))
+        self.assertTrue(interesting_address in force_str(outbox[-2].as_string()))
         if draft.stream_id == 'ietf':
-            self.assertTrue(draft.ad.role_email("ad").address in force_text(outbox[-2].as_string()))
-            self.assertTrue(ballot_position.balloter.role_email("ad").address in force_text(outbox[-2].as_string()))
+            self.assertTrue(draft.ad.role_email("ad").address in force_str(outbox[-2].as_string()))
+            self.assertTrue(ballot_position.balloter.role_email("ad").address in force_str(outbox[-2].as_string()))
         self.assertTrue("New Version Notification" in outbox[-1]["Subject"])
         self.assertTrue(name in get_payload_text(outbox[-1]))
         r = self.client.get(urlreverse('ietf.doc.views_search.recent_drafts'))
@@ -791,7 +877,7 @@ class SubmitTests(BaseSubmitTestCase):
 
         # Approval request notification should be sent to the AD for the group
         self.assertEqual(len(outbox), mailbox_before + 1)
-        self.assertTrue("New draft waiting for approval" in outbox[-1]["Subject"])
+        self.assertTrue("New Internet-Draft waiting for approval" in outbox[-1]["Subject"])
         self.assertTrue(name in outbox[-1]["Subject"])
         self.assertTrue(ad.user.email in outbox[-1]['To'])
 
@@ -863,12 +949,30 @@ class SubmitTests(BaseSubmitTestCase):
         r = self.client.post(confirmation_url, {'action':'confirm'})
         self.assertEqual(r.status_code, 302)
 
-        draft = Document.objects.get(docalias__name=name)
+        draft = Document.objects.get(name=name)
         self.assertEqual(draft.rev, rev)
         new_revision = draft.latest_event()
         self.assertEqual(new_revision.type, "new_revision")
         self.assertEqual(new_revision.by.name, "Submitter Name")
         self.verify_bibxml_ids_creation(draft)
+
+        repository_path = Path(draft.get_file_name())
+        self.assertTrue(repository_path.exists()) # Note that this doesn't check that it has the right _content_
+        ftp_path = Path(settings.FTP_DIR) / "internet-drafts" / repository_path.name
+        self.assertTrue(repository_path.samefile(ftp_path))
+        all_archive_path = Path(settings.INTERNET_ALL_DRAFTS_ARCHIVE_DIR) / repository_path.name
+        self.assertTrue(repository_path.samefile(all_archive_path))
+        for ext in settings.IDSUBMIT_FILE_TYPES:
+            if ext == "txt":
+                continue
+            variant_path = repository_path.parent / f"{repository_path.stem}.{ext}"
+            if variant_path.exists():
+                variant_ftp_path = Path(settings.FTP_DIR) / "internet-drafts" / variant_path.name
+                self.assertTrue(variant_path.samefile(variant_ftp_path))
+                variant_all_archive_path = Path(settings.INTERNET_ALL_DRAFTS_ARCHIVE_DIR) / variant_path.name
+                self.assertTrue(variant_path.samefile(variant_all_archive_path))
+
+
 
     def test_submit_new_individual_txt(self):
         self.submit_new_individual(["txt"])
@@ -903,7 +1007,7 @@ class SubmitTests(BaseSubmitTestCase):
         action = force_post_button.parents("form").find('input[type=hidden][name="action"]').val()
         r = self.client.post(status_url, dict(action=action))
 
-        doc = Document.objects.get(docalias__name=name)
+        doc = Document.objects.get(name=name)
         self.assertEqual(doc.documentauthor_set.count(), 1)
         docauth = doc.documentauthor_set.first()
         self.assertEqual(docauth.person, author)
@@ -1036,7 +1140,7 @@ class SubmitTests(BaseSubmitTestCase):
         self.assertIn("New Version Notification", notification_email["Subject"])
         self.assertIn(author.email().address.lower(), notification_email["To"])
 
-        draft = Document.objects.get(docalias__name=name)
+        draft = Document.objects.get(name=name)
         self.assertEqual(draft.rev, rev)
         self.assertEqual(draft.docextresource_set.count(), 0)
         new_revision = draft.latest_event()
@@ -1084,7 +1188,7 @@ class SubmitTests(BaseSubmitTestCase):
         self._assert_extresources_form_not_present(r)
 
         # Check that the draft itself got the resources        
-        draft = Document.objects.get(docalias__name=name)
+        draft = Document.objects.get(name=name)
         self.assertCountEqual(
             [str(r) for r in draft.docextresource_set.all()],
             [str(r) for r in resources],
@@ -1093,7 +1197,7 @@ class SubmitTests(BaseSubmitTestCase):
         self.verify_bibxml_ids_creation(draft)
 
     def test_submit_update_individual(self):
-        IndividualDraftFactory(name='draft-ietf-random-thing', states=[('draft','rfc')], other_aliases=['rfc9999',], pages=5)
+        IndividualDraftFactory(name='draft-ietf-random-thing', states=[('draft','active'),('draft-iesg','approved')], pages=5)
         ad=Person.objects.get(user__username='ad')
         # Group of None here does not reflect real individual submissions
         draft = IndividualDraftFactory(group=None, ad = ad, authors=[ad,], notify='aliens@example.mars', pages=5)
@@ -1103,23 +1207,14 @@ class SubmitTests(BaseSubmitTestCase):
         status_url, author = self.do_submission(name,rev)
         mailbox_before = len(outbox)
 
-        replaced_alias = draft.docalias.first()
-        r = self.supply_extra_metadata(name, status_url, "Submitter Name", "author@example.com", replaces=[str(replaced_alias.pk)])
+        r = self.supply_extra_metadata(name, status_url, "Submitter Name", "author@example.com", replaces=[str(draft.pk)])
         self.assertEqual(r.status_code, 200)
         self.assertContains(r, 'cannot replace itself')
         self._assert_extresources_in_table(r, [])
         self._assert_extresources_form(r, [])
 
-        replaced_alias = DocAlias.objects.get(name='draft-ietf-random-thing')
-        r = self.supply_extra_metadata(name, status_url, "Submitter Name", "author@example.com", replaces=[str(replaced_alias.pk)])
-        self.assertEqual(r.status_code, 200)
-        self.assertContains(r, 'cannot replace an RFC')
-        self._assert_extresources_in_table(r, [])
-        self._assert_extresources_form(r, [])
-
-        replaced_alias.document.set_state(State.objects.get(type='draft-iesg',slug='approved'))
-        replaced_alias.document.set_state(State.objects.get(type='draft',slug='active'))
-        r = self.supply_extra_metadata(name, status_url, "Submitter Name", "author@example.com", replaces=[str(replaced_alias.pk)])
+        replaced = Document.objects.get(name='draft-ietf-random-thing')
+        r = self.supply_extra_metadata(name, status_url, "Submitter Name", "author@example.com", replaces=[str(replaced.pk)])
         self.assertEqual(r.status_code, 200)
         self.assertContains(r, 'approved by the IESG and cannot')
         self._assert_extresources_in_table(r, [])
@@ -1139,7 +1234,7 @@ class SubmitTests(BaseSubmitTestCase):
         r = self.client.post(confirmation_url, {'action':'confirm'})
         self.assertEqual(r.status_code, 302)
         self.assertEqual(len(outbox), mailbox_before+3)
-        draft = Document.objects.get(docalias__name=name)
+        draft = Document.objects.get(name=name)
         self.assertEqual(draft.rev, rev)
         self.assertEqual(draft.relateddocument_set.filter(relationship_id='replaces').count(), replaces_count)
         self.assertEqual(draft.docextresource_set.count(), 0)
@@ -1155,15 +1250,15 @@ class SubmitTests(BaseSubmitTestCase):
         
         Unlike some other tests in this module, does not confirm draft if this would be required.
         """
-        orig_draft = DocumentFactory(
+        orig_draft: Document = DocumentFactory(  # type: ignore[annotation-unchecked]
             type_id='draft',
             group=GroupFactory(type_id=group_type) if group_type else None,
             stream_id=stream_type,
-        )  # type: Document
+        )
         name = orig_draft.name
         group = orig_draft.group
         new_rev = '%02d' % (int(orig_draft.rev) + 1)
-        author = PersonFactory()  # type: Person
+        author: Person = PersonFactory()  # type: ignore[annotation-unchecked]
         DocumentAuthor.objects.create(person=author, document=orig_draft)
         orig_draft.docextresource_set.create(name_id='faq', value='https://faq.example.com/')
         orig_draft.docextresource_set.create(name_id='wiki', value='https://wiki.example.com', display_name='Test Wiki')
@@ -1213,7 +1308,7 @@ class SubmitTests(BaseSubmitTestCase):
             status_url,
             "Submitter Name",
             "submitter@example.com",
-            replaces=[str(replaced_draft.docalias.first().pk)],
+            replaces=[str(replaced_draft.pk)],
         )
         
         submission = Submission.objects.get(name=name, rev=rev)
@@ -1224,7 +1319,7 @@ class SubmitTests(BaseSubmitTestCase):
             ad.user.email if notify_ad else '%s-chairs@ietf.org' % replaced_draft.group.acronym,
             notice['To']
         )
-        self.assertIn('New draft waiting for approval', notice['Subject'])
+        self.assertIn('New Internet-Draft waiting for approval', notice['Subject'])
 
     def test_submit_new_individual_replacing_wg(self):
         self.submit_new_individual_replacing_wg()
@@ -1257,16 +1352,13 @@ class SubmitTests(BaseSubmitTestCase):
         r = self.client.post(confirmation_url, {'action':'cancel'})
         self.assertEqual(r.status_code, 302)
         self.assertEqual(len(outbox), mailbox_before)
-        draft = Document.objects.get(docalias__name=name)
+        draft = Document.objects.get(name=name)
         self.assertEqual(draft.rev, old_rev)
 
     def test_submit_new_wg_with_dash(self):
         group = Group.objects.create(acronym="mars-special", name="Mars Special", type_id="wg", state_id="active")
-
         name = "draft-ietf-%s-testing-tests" % group.acronym
-
-        self.do_submission(name, "00")
-
+        self.create_and_post_submission(name=name, rev="00", author=PersonFactory())
         self.assertEqual(Submission.objects.get(name=name).group.acronym, group.acronym)
 
     def test_submit_new_wg_v2_country_only(self):
@@ -1292,19 +1384,15 @@ class SubmitTests(BaseSubmitTestCase):
 
     def test_submit_new_irtf(self):
         group = Group.objects.create(acronym="saturnrg", name="Saturn", type_id="rg", state_id="active")
-
         name = "draft-irtf-%s-testing-tests" % group.acronym
-
-        self.do_submission(name, "00")
-
-        self.assertEqual(Submission.objects.get(name=name).group.acronym, group.acronym)
-        self.assertEqual(Submission.objects.get(name=name).group.type_id, group.type_id)
+        self.create_and_post_submission(name=name, rev="00", author=PersonFactory())
+        submission = Submission.objects.get(name=name)
+        self.assertEqual(submission.group.acronym, group.acronym)
+        self.assertEqual(submission.group.type_id, group.type_id)
 
     def test_submit_new_iab(self):
         name = "draft-iab-testing-tests"
-
-        self.do_submission(name, "00")
-
+        self.create_and_post_submission(name=name, rev="00", author=PersonFactory())
         self.assertEqual(Submission.objects.get(name=name).group.acronym, "iab")
 
     def test_cancel_submission(self):
@@ -1370,8 +1458,7 @@ class SubmitTests(BaseSubmitTestCase):
             "edit-pages": "123",
             "submitter-name": "Some Random Test Person",
             "submitter-email": "random@example.com",
-            "replaces": [str(draft.docalias.first().pk)],
-            "edit-note": "no comments",
+            "replaces": [str(draft.pk)],
             "authors-0-name": "Person 1",
             "authors-0-email": "person1@example.com",
             "authors-1-name": "Person 2",
@@ -1387,9 +1474,8 @@ class SubmitTests(BaseSubmitTestCase):
         self.assertEqual(submission.document_date, document_date)
         self.assertEqual(submission.abstract, "some abstract")
         self.assertEqual(submission.pages, 123)
-        self.assertEqual(submission.note, "no comments")
         self.assertEqual(submission.submitter, "Some Random Test Person <random@example.com>")
-        self.assertEqual(submission.replaces, draft.docalias.first().name)
+        self.assertEqual(submission.replaces, draft.name)
         self.assertEqual(submission.state_id, "manual")
 
         authors = submission.authors
@@ -1421,7 +1507,7 @@ class SubmitTests(BaseSubmitTestCase):
         r = self.client.post(status_url, dict(action=action))
         self.assertEqual(r.status_code, 302)
 
-        draft = Document.objects.get(docalias__name=name)
+        draft = Document.objects.get(name=name)
         self.assertEqual(draft.rev, rev)
         self.assertEqual(draft.docextresource_set.count(), 0)
         self.verify_bibxml_ids_creation(draft)
@@ -1514,17 +1600,21 @@ class SubmitTests(BaseSubmitTestCase):
         rev = "00"
         group = "mars"
 
-        self.do_submission(name, rev, group, ["txt", "xml", "pdf"])
+        self.do_submission(name, rev, group, ["txt", "xml"])
 
         self.assertEqual(Submission.objects.filter(name=name).count(), 1)
 
         self.assertTrue(os.path.exists(os.path.join(self.staging_dir, "%s-%s.txt" % (name, rev))))
-        self.assertTrue(name in io.open(os.path.join(self.staging_dir, "%s-%s.txt" % (name, rev))).read())
+        fd = io.open(os.path.join(self.staging_dir, "%s-%s.txt" % (name, rev)))
+        txt_contents = fd.read()
+        fd.close()
+        self.assertTrue(name in txt_contents)
         self.assertTrue(os.path.exists(os.path.join(self.staging_dir, "%s-%s.xml" % (name, rev))))
-        self.assertTrue(name in io.open(os.path.join(self.staging_dir, "%s-%s.xml" % (name, rev))).read())
-        self.assertTrue('<?xml version="1.0" encoding="UTF-8"?>' in io.open(os.path.join(self.staging_dir, "%s-%s.xml" % (name, rev))).read())
-        self.assertTrue(os.path.exists(os.path.join(self.staging_dir, "%s-%s.pdf" % (name, rev))))
-        self.assertTrue('This is PDF' in io.open(os.path.join(self.staging_dir, "%s-%s.pdf" % (name, rev))).read())
+        fd = io.open(os.path.join(self.staging_dir, "%s-%s.xml" % (name, rev)))
+        xml_contents = fd.read()
+        fd.close()
+        self.assertTrue(name in xml_contents)
+        self.assertTrue('<?xml version="1.0" encoding="UTF-8"?>' in xml_contents)
 
     def test_expire_submissions(self):
         s = Submission.objects.create(name="draft-ietf-mars-foo",
@@ -1630,7 +1720,7 @@ class SubmitTests(BaseSubmitTestCase):
         for format in formats:
             files[format], author = submission_file(f'{name}-{rev}', f'{name}-{rev}.bad', group, "test_submission.bad")
 
-        r = self.client.post(url, files)
+        r = self.post_to_upload_submission(url, files)
 
         self.assertEqual(r.status_code, 200)
         q = PyQuery(r.content)
@@ -1649,44 +1739,31 @@ class SubmitTests(BaseSubmitTestCase):
             files[format], author = submission_file(name_in_doc, name_in_post, group, "test_submission.%s" % format)
             files[format].name = name_in_post
 
-        r = self.client.post(url, files)
-
+        r = self.post_to_upload_submission(url, files)
         self.assertEqual(r.status_code, 200)
-        q = PyQuery(r.content)
-        self.assertTrue(len(q("form .invalid-feedback")) > 0)
-        m = q('div.invalid-feedback').text()
-
-        return r, q, m
+        return r
         
     def test_submit_bad_file_txt(self):
         r, q, m = self.submit_bad_file("some name", ["txt"])
         self.assertIn('Invalid characters were found in the name', m)
         self.assertIn('Expected the TXT file to have extension ".txt"', m)
-        self.assertIn('Expected an TXT file of type "text/plain"', m)
         self.assertIn('document does not contain a legitimate name', m)
 
     def test_submit_bad_doc_name(self):
-        r, q, m = self.submit_bad_doc_name_with_ext(name_in_doc="draft-foo.dot-bar", name_in_post="draft-foo.dot-bar", formats=["txt"])
-        self.assertIn('contains a disallowed character with byte code: 46', m)
+        r = self.submit_bad_doc_name_with_ext(name_in_doc="draft-foo.dot-bar", name_in_post="draft-foo.dot-bar", formats=["txt"])
+        self.assertContains(r, "contains a disallowed character with byte code: 46")
         # This actually is allowed by the existing code. A significant rework of the validation mechanics is needed.
         # r, q, m = self.submit_bad_doc_name_with_ext(name_in_doc="draft-foo-bar-00.txt", name_in_post="draft-foo-bar-00.txt", formats=["txt"])
         # self.assertIn('Did you include a filename extension in the name by mistake?', m)
-        r, q, m = self.submit_bad_doc_name_with_ext(name_in_doc="draft-foo-bar-00.xml", name_in_post="draft-foo-bar-00.xml", formats=["xml"])
-        self.assertIn('Did you include a filename extension in the name by mistake?', m)
-        r, q, m = self.submit_bad_doc_name_with_ext(name_in_doc="../malicious-name-in-content-00", name_in_post="../malicious-name-in-post-00.xml", formats=["xml"])
-        self.assertIn('Did you include a filename extension in the name by mistake?', m)
+        r = self.submit_bad_doc_name_with_ext(name_in_doc="draft-foo-bar-00.xml", name_in_post="draft-foo-bar-00.xml", formats=["xml"])
+        self.assertContains(r, "Could not extract a valid Internet-Draft revision from the XML")
+        r = self.submit_bad_doc_name_with_ext(name_in_doc="../malicious-name-in-content-00", name_in_post="../malicious-name-in-post-00.xml", formats=["xml"])
+        self.assertContains(r, "Did you include a filename extension in the name by mistake?")
 
     def test_submit_bad_file_xml(self):
         r, q, m = self.submit_bad_file("some name", ["xml"])
         self.assertIn('Invalid characters were found in the name', m)
         self.assertIn('Expected the XML file to have extension ".xml"', m)
-        self.assertIn('Expected an XML file of type "application/xml"', m)
-
-    def test_submit_bad_file_pdf(self):
-        r, q, m = self.submit_bad_file("some name", ["pdf"])
-        self.assertIn('Invalid characters were found in the name', m)
-        self.assertIn('Expected the PDF file to have extension ".pdf"', m)
-        self.assertIn('Expected an PDF file of type "application/pdf"', m)
 
     def test_submit_file_in_archive(self):
         name = "draft-authorname-testing-file-exists"
@@ -1711,7 +1788,7 @@ class SubmitTests(BaseSubmitTestCase):
                 with io.open(fn, 'w') as f:
                     f.write("a" * 2000)
                 files[format], author = submission_file(f'{name}-{rev}', f'{name}-{rev}.{format}', group, "test_submission.%s" % format)
-            r = self.client.post(url, files)
+            r = self.post_to_upload_submission(url, files)
 
             self.assertEqual(r.status_code, 200)
             q = PyQuery(r.content)
@@ -1722,25 +1799,11 @@ class SubmitTests(BaseSubmitTestCase):
     def test_submit_nonascii_name(self):
         name = "draft-authorname-testing-nonascii"
         rev = "00"
-        group = None
 
-        # get
-        url = urlreverse('ietf.submit.views.upload_submission')
-        r = self.client.get(url)
-        self.assertEqual(r.status_code, 200)
-        q = PyQuery(r.content)
-
-        # submit
-        #author = PersonFactory(name=u"Jörgen Nilsson".encode('latin1'))
         user = UserFactory(first_name="Jörgen", last_name="Nilsson")
         author = PersonFactory(user=user)
 
-        file, __ = submission_file(f'{name}-{rev}', f'{name}-{rev}.txt', group, "test_submission.nonascii", author=author, ascii=False)
-        files = {"txt": file }
-
-        r = self.client.post(url, files)
-        self.assertEqual(r.status_code, 302)
-        status_url = r["Location"]
+        status_url, _ = self.do_submission(name=name, rev=rev, author=author, base_filename="test_submission.nonascii", ascii=False)
         r = self.client.get(status_url)
         q = PyQuery(r.content)
         m = q('p.alert-warning').text()
@@ -1750,19 +1813,12 @@ class SubmitTests(BaseSubmitTestCase):
     def test_submit_missing_author_email(self):
         name = "draft-authorname-testing-noemail"
         rev = "00"
-        group = None
 
         author = PersonFactory()
         for e in author.email_set.all():
             e.delete()
 
-        files = {"txt": submission_file(f'{name}-{rev}', f'{name}-{rev}.txt', group, "test_submission.txt", author=author, ascii=True)[0] }
-
-        # submit
-        url = urlreverse('ietf.submit.views.upload_submission')
-        r = self.client.post(url, files)
-        self.assertEqual(r.status_code, 302)
-        status_url = r["Location"]
+        status_url, _ = self.do_submission(name=name, rev=rev, author=author)
         r = self.client.get(status_url)
         q = PyQuery(r.content)
         m = q('p.text-danger').text()
@@ -1773,20 +1829,13 @@ class SubmitTests(BaseSubmitTestCase):
     def test_submit_bad_author_email(self):
         name = "draft-authorname-testing-bademail"
         rev = "00"
-        group = None
 
         author = PersonFactory()
         email = author.email_set.first()
         email.address = '@bad.email'
         email.save()
 
-        files = {"xml": submission_file(f'{name}-{rev}',f'{name}-{rev}.xml', group, "test_submission.xml", author=author, ascii=False)[0] }
-
-        # submit
-        url = urlreverse('ietf.submit.views.upload_submission')
-        r = self.client.post(url, files)
-        self.assertEqual(r.status_code, 302)
-        status_url = r["Location"]
+        status_url, _ = self.do_submission(name=name, rev=rev, author=author, formats=('xml',))
         r = self.client.get(status_url)
         q = PyQuery(r.content)
         m = q('p.text-danger').text()
@@ -1797,15 +1846,8 @@ class SubmitTests(BaseSubmitTestCase):
     def test_submit_invalid_yang(self):
         name = "draft-yang-testing-invalid"
         rev = "00"
-        group = None
 
-        # submit
-        files = {"txt": submission_file(f'{name}-{rev}', f'{name}-{rev}.txt', group, "test_submission_invalid_yang.txt")[0] }
-
-        url = urlreverse('ietf.submit.views.upload_submission')
-        r = self.client.post(url, files)
-        self.assertEqual(r.status_code, 302)
-        status_url = r["Location"]
+        status_url, _ = self.do_submission(name=name, rev=rev, base_filename="test_submission_invalid_yang")
         r = self.client.get(status_url)
         q = PyQuery(r.content)
         #
@@ -1813,7 +1855,7 @@ class SubmitTests(BaseSubmitTestCase):
         #
         m = q('#yang-validation-message').text()
         for command in ['xym', 'pyang', 'yanglint']:
-            version = VersionInfo.objects.get(command=command).version
+            version = tool_version[command]
             if command != 'yanglint' or (settings.SUBMIT_YANGLINT_COMMAND and os.path.exists(settings.YANGLINT_BINARY)):
                 self.assertIn(version, m)
         self.assertIn("draft-yang-testing-invalid-00.txt", m)
@@ -1982,7 +2024,7 @@ class SubmitTests(BaseSubmitTestCase):
         group = GroupFactory()
         # someone to be notified of resource suggestion when permission not granted
         RoleFactory(group=group, person=PersonFactory(), name_id='chair')
-        submission = SubmissionFactory(state_id='grp-appr', group=group)  # type: Submission
+        submission: Submission = SubmissionFactory(state_id='grp-appr', group=group)  # type: ignore[annotation-unchecked]
         SubmissionExtResourceFactory(submission=submission)
 
         # use secretary user to ensure we have permission to approve
@@ -2000,7 +2042,7 @@ class SubmitTests(BaseSubmitTestCase):
         group = GroupFactory()
         # someone to be notified of resource suggestion when permission not granted
         RoleFactory(group=group, person=PersonFactory(), name_id='chair')
-        submission = SubmissionFactory(state_id=state, group=group)  # type: Submission
+        submission: Submission = SubmissionFactory(state_id=state, group=group)  # type: ignore[annotation-unchecked]
         SubmissionExtResourceFactory(submission=submission)
 
         url = urlreverse(
@@ -2052,7 +2094,7 @@ class SubmitTests(BaseSubmitTestCase):
 
     def test_forcepost_with_extresources(self):
         # state needs to be one that has 'posted' as a next state
-        submission = SubmissionFactory(state_id='grp-appr')  # type: Submission
+        submission: Submission = SubmissionFactory(state_id='grp-appr')  # type: ignore[annotation-unchecked]
         SubmissionExtResourceFactory(submission=submission)
 
         url = urlreverse(
@@ -2291,457 +2333,24 @@ class ApprovalsTestCase(BaseSubmitTestCase):
 
         self.assertEqual(len(Preapproval.objects.filter(name=preapproval.name)), 0)
 
-class ManualPostsTestCase(BaseSubmitTestCase):
-    def test_manual_posts(self):
-        GroupFactory(acronym='mars')
 
-        url = urlreverse('ietf.submit.views.manualpost')
-        # Secretariat has access
-        self.client.login(username="secretary", password="secretary+password")
-
-        Submission.objects.create(name="draft-ietf-mars-foo",
-                                  group=Group.objects.get(acronym="mars"),
-                                  submission_date=date_today(),
-                                  state_id="manual")
-        Submission.objects.create(name="draft-ietf-mars-bar",
-                                  group=Group.objects.get(acronym="mars"),
-                                  submission_date=date_today(),
-                                  rev="00",
-                                  state_id="grp-appr")
-
-        # get
-        r = self.client.get(url)
-        self.assertEqual(r.status_code, 200)
-        q = PyQuery(r.content)
-
-        self.assertEqual(len(q('.submissions a:contains("draft-ietf-mars-foo")')), 1)
-        self.assertEqual(len(q('.submissions a:contains("draft-ietf-mars-bar")')), 0)
-
-    def test_waiting_for_draft(self):
-        message_string = """To: somebody@ietf.org
-From: joe@test.com
-Date: {}
-Subject: test submission via email
-
-Please submit my draft at http://test.com/mydraft.txt
-
-Thank you
-""".format(timezone.now().ctime())
-        message = email.message_from_string(force_str(message_string))
-        submission, submission_email_event = (
-            add_submission_email(request=None,
-                                 remote_ip ="192.168.0.1",
-                                 name = "draft-my-new-draft",
-                                 rev='00',
-                                 submission_pk=None,
-                                 message = message,
-                                 by = Person.objects.get(name="(System)"),
-                                 msgtype = "msgin") )
-
-        url = urlreverse('ietf.submit.views.manualpost')
-        # Secretariat has access
-        self.client.login(username="secretary", password="secretary+password")
-
-        # get
-        r = self.client.get(url)
-        self.assertEqual(r.status_code, 200)
-        q = PyQuery(r.content)
-
-        self.assertEqual(len(q('.waiting-for-draft a:contains("draft-my-new-draft")')), 1)
-
-        # Same name should raise an error
-        with self.assertRaises(Exception):
-            add_submission_email(request=None,
-                                 remote_ip ="192.168.0.1",
-                                 name = "draft-my-new-draft",
-                                 rev='00',
-                                 submission_pk=None,
-                                 message = message,
-                                 by = Person.objects.get(name="(System)"),
-                                 msgtype = "msgin")
-
-        # Cancel this one
-        r = self.client.post(urlreverse("ietf.submit.views.cancel_waiting_for_draft"), {
-            "submission_id": submission.pk,
-            "access_token": submission.access_token(),
-        })
-        self.assertEqual(r.status_code, 302)
-        url = r["Location"]
-        r = self.client.get(url)
-        self.assertEqual(r.status_code, 200)
-        q = PyQuery(r.content)
-        self.assertEqual(len(q('.waiting-for-draft a:contains("draft-my-new-draft")')), 0)
-
-        # Should now be able to add it again
-        submission, submission_email_event = (
-            add_submission_email(request=None,
-                                 remote_ip ="192.168.0.1",
-                                 name = "draft-my-new-draft",
-                                 rev='00',
-                                 submission_pk=None,
-                                 message = message,
-                                 by = Person.objects.get(name="(System)"),
-                                 msgtype = "msgin") )
-
-
-    def test_waiting_for_draft_with_attachment(self):
-        frm = "joe@test.com"
-        
-        message_string = """To: somebody@ietf.org
-From: {}
-Date: {}
-Subject: A very important message with a small attachment
-Content-Type: multipart/mixed; boundary="------------090908050800030909090207"
-
-This is a multi-part message in MIME format.
---------------090908050800030909090207
-Content-Type: text/plain; charset=utf-8; format=flowed
-Content-Transfer-Encoding: 7bit
-
-The message body will probably say something about the attached document
-
---------------090908050800030909090207
-Content-Type: text/plain; charset=UTF-8; name="attach.txt"
-Content-Transfer-Encoding: base64
-Content-Disposition: attachment; filename="attach.txt"
-
-QW4gZXhhbXBsZSBhdHRhY2htZW50IHd0aG91dCB2ZXJ5IG11Y2ggaW4gaXQuCgpBIGNvdXBs
-ZSBvZiBsaW5lcyAtIGJ1dCBpdCBjb3VsZCBiZSBhIGRyYWZ0Cg==
---------------090908050800030909090207--
-""".format(frm, timezone.now().ctime())
-
-        message = email.message_from_string(force_str(message_string))
-        submission, submission_email_event = (
-            add_submission_email(request=None,
-                                 remote_ip ="192.168.0.1",
-                                 name = "draft-my-new-draft",
-                                 rev='00',
-                                 submission_pk=None,
-                                 message = message,
-                                 by = Person.objects.get(name="(System)"),
-                                 msgtype = "msgin") )
-
-        manualpost_page_url = urlreverse('ietf.submit.views.manualpost')
-        # Secretariat has access
-        self.client.login(username="secretary", password="secretary+password")
-
-        self.check_manualpost_page(submission=submission, 
-                                   submission_email_event=submission_email_event,
-                                   the_url=manualpost_page_url, 
-                                   submission_name_fragment='draft-my-new-draft',
-                                   frm=frm,
-                                   is_secretariat=True)
- 
-        # Try the status page with no credentials
-        self.client.logout()
-
-        self.check_manualpost_page(submission=submission, 
-                                   submission_email_event=submission_email_event,
-                                   the_url=manualpost_page_url, 
-                                   submission_name_fragment='draft-my-new-draft',
-                                   frm=frm,
-                                   is_secretariat=False)
-        
-        # Post another message to this submission using the link
-        message_string = """To: somebody@ietf.org
-From: joe@test.com
-Date: {}
-Subject: A new submission message with a small attachment
-Content-Type: multipart/mixed; boundary="------------090908050800030909090207"
-
-This is a multi-part message in MIME format.
---------------090908050800030909090207
-Content-Type: text/plain; charset=utf-8; format=flowed
-Content-Transfer-Encoding: 7bit
-
-The message body will probably say something more about the attached document
-
---------------090908050800030909090207
-Content-Type: text/plain; charset=UTF-8; name="attach.txt"
-Content-Transfer-Encoding: base64
-Content-Disposition: attachment; filename="attachment.txt"
-
-QW4gZXhhbXBsZSBhdHRhY2htZW50IHd0aG91dCB2ZXJ5IG11Y2ggaW4gaXQuCgpBIGNvdXBs
-ZSBvZiBsaW5lcyAtIGJ1dCBpdCBjb3VsZCBiZSBhIGRyYWZ0Cg==
---------------090908050800030909090207--
-""".format(timezone.now().ctime())
-
-        # Back to secretariat
-        self.client.login(username="secretary", password="secretary+password")
-
-        r, q = self.request_and_parse(manualpost_page_url)
-
-        url = self.get_href(q, "a#new-submission-email:contains('New submission from email')")
-
-        # Get the form
-        r = self.client.get(url)
-        self.assertEqual(r.status_code, 200)
-        q = PyQuery(r.content)
-        #self.assertEqual(len(q('input[name=edit-title]')), 1)
-
-        # Post the new message
-        r = self.client.post(url, {
-            "name": "draft-my-next-new-draft-00",
-            "direction": "incoming",
-            "message": message_string,
-        })
-
-        if r.status_code != 302:
-            q = PyQuery(r.content)
-            print(q)
-
-        self.assertEqual(r.status_code, 302)
-        
-
-        #self.check_manualpost_page(submission, submission_email_event,
-        #                        url, 'draft-my-next-new-draft'
-        #                        'Another very important message',
-        #                        true)
-
-    def check_manualpost_page(self, submission, submission_email_event,
-                              the_url, submission_name_fragment,
-                              frm,
-                              is_secretariat):
-        # get the page listing manual posts
-        r, q = self.request_and_parse(the_url)
-        selector = "#waiting-for-draft a#add-submission-email%s:contains('Add email')" % submission.pk
-
-        if is_secretariat:
-            # Can add an email to the submission
-            add_email_url = self.get_href(q, selector)
-        else:
-            # No add email button button
-            self.assertEqual(len(q(selector)), 0)
-
-        # Find the link for our submission in those awaiting drafts
-        submission_url = self.get_href(q, "#waiting-for-draft a#aw{}:contains('{}')".
-                                       format(submission.pk, submission_name_fragment))
-
-        # Follow the link to the status page for this submission
-        r, q = self.request_and_parse(submission_url)
-        
-        selector = "#history a#reply%s:contains('Reply')" % submission.pk
-
-        if is_secretariat:
-            # check that reply button is visible and get the form
-            reply_url = self.get_href(q, selector)
-
-            # Get the form
-            r = self.client.get(reply_url)
-            self.assertEqual(r.status_code, 200)
-            reply_q = PyQuery(r.content)
-            self.assertEqual(len(reply_q('input[name=to]')), 1)
-        else:
-            # No reply button
-            self.assertEqual(len(q(selector)), 0)
-
-        if is_secretariat:
-            # Now try to send an email using the send email link
-    
-            selector = "a#send%s:contains('Send Email')" % submission.pk
-            send_url = self.get_href(q, selector)
-
-            self.do_submission_email(the_url = send_url,
-                                     to = frm,
-                                     body = "A new message")
-
-        # print q
-        # print submission.pk
-        # print submission_email_event.pk
-        
-        # Find the link for our message in the list
-        url = self.get_href(q, "#aw{}-{}:contains('{}')".format(submission.pk, 
-                                                                submission_email_event.message.pk,
-                                                                "Received message - manual post"))
-        
-        # Page displaying message details
-        r, q = self.request_and_parse(url)
-        
-        if is_secretariat:
-            # check that reply button is visible
-
-            reply_href = self.get_href(q, "a#reply%s:contains('Reply')" % submission.pk)
-
-        else:
-            # No reply button
-            self.assertEqual(len(q(selector)), 0)
-            reply_href = None
-
-        # check that attachment link is visible
-
-        url = self.get_href(q, "#email-details a#attach{}:contains('attach.txt')".format(submission.pk))
-
-        # Fetch the attachment
-        r = self.client.get(url)
-        self.assertEqual(r.status_code, 200)
-        
-        # Attempt a reply if we can
-        if reply_href == None:
-            return
-
-        self.do_submission_email(the_url = reply_href,
-                                 to = frm,
-                                 body = "A reply to the message")
-        
-        # try adding an email to the submission
-        # Use the add email link from the manual post listing page
-
-        if is_secretariat:
-            # Can add an email to the submission
-            # add_email_url set previously
-            r = self.client.get(add_email_url)
-            self.assertEqual(r.status_code, 200)
-            add_email_q = PyQuery(r.content)
-            self.assertEqual(len(add_email_q('input[name=submission_pk]')), 1)
-
-            # Add a simple email
-            new_message_string = """To: somebody@ietf.org
-From: joe@test.com
-Date: {}
-Subject: Another message
-
-About my submission
-
-Thank you
-""".format(timezone.now().ctime())
-
-            r = self.client.post(add_email_url, {
-                "name": "{}-{}".format(submission.name, submission.rev),
-                "direction": "incoming",
-                "submission_pk": submission.pk,
-                "message": new_message_string,
-            })
-
-            if r.status_code != 302:
-                q = PyQuery(r.content)
-                print(q)
-
-            self.assertEqual(r.status_code, 302)
-
-    def request_and_parse(self, url):
-        r = self.client.get(url)
-        self.assertEqual(r.status_code, 200)
-        return r, PyQuery(r.content)
-
-        
-    def get_href(self, q, query):
-        link = q(query)
-        self.assertEqual(len(link), 1)
-
-        return PyQuery(link[0]).attr('href')
-
-
-    def do_submission_email(self, the_url, to, body):
-        # check the page
-        r = self.client.get(the_url)
-        q = PyQuery(r.content)
-        post_button = q('[type=submit]:contains("Send email")')
-        self.assertEqual(len(post_button), 1)
-        subject = post_button.parents("form").find('input[name="subject"]').val()
-        frm = post_button.parents("form").find('input[name="frm"]').val()
-        cc = post_button.parents("form").find('input[name="cc"]').val()
-        reply_to = post_button.parents("form").find('input[name="reply_to"]').val()
-
-        empty_outbox()
-        
-        # post submitter info
-        r = self.client.post(the_url, {
-            "subject": subject,
-            "frm": frm,
-            "to": to,
-            "cc": cc,
-            "reply_to": reply_to,
-            "body": body,
-        })
-
-        self.assertEqual(r.status_code, 302)
-
-        self.assertEqual(len(outbox), 1)
-
-        outmsg = outbox[0]
-        self.assertTrue(to in outmsg['To'])
-        
-        reply_to = outmsg['Reply-To']
-        self.assertIsNotNone(reply_to, "Expected Reply-To")
-        
-        # Build a reply
-
-        message_string = """To: {}
-From: {}
-Date: {}
-Subject: test
-""".format(reply_to, to, timezone.now().ctime())
-
-        result = process_response_email(message_string)
-        self.assertIsInstance(result, Message)
-
-        return r
-
-    def do_submission(self, name, rev, group=None, formats=["txt",]):
-        # We're not testing the submission process - just the submission status 
-
-        # get
-        url = urlreverse('ietf.submit.views.upload_submission')
-        r = self.client.get(url)
-        self.assertEqual(r.status_code, 200)
-        q = PyQuery(r.content)
-        self.assertEqual(len(q('input[type=file][name=txt]')), 1)
-        self.assertEqual(len(q('input[type=file][name=xml]')), 1)
-
-        # submit
-        files = {}
-        for format in formats:
-            files[format], author = submission_file(f'{name}-{rev}', f'{name}-{rev}.{format}', group, "test_submission.%s" % format)
-
-        r = self.client.post(url, files)
-        if r.status_code != 302:
-            q = PyQuery(r.content)
-            print(q('div.invalid-feedback span.form-text div').text())
-
-        self.assertEqual(r.status_code, 302)
-
-        status_url = r["Location"]
-        for format in formats:
-            self.assertTrue(os.path.exists(os.path.join(self.staging_dir, "%s-%s.%s" % (name, rev, format))))
-        self.assertEqual(Submission.objects.filter(name=name).count(), 1)
-        submission = Submission.objects.get(name=name)
-        self.assertTrue(all([ c.passed!=False for c in submission.checks.all() ]))
-        self.assertEqual(len(submission.authors), 1)
-        author = submission.authors[0]
-        self.assertEqual(author["name"], "Author Name")
-        self.assertEqual(author["email"], "author@example.com")
-
-        return status_url
-
-
-    def supply_extra_metadata(self, name, status_url, submitter_name, submitter_email):
-        # check the page
-        r = self.client.get(status_url)
-        q = PyQuery(r.content)
-        post_button = q('[type=submit]:contains("Post")')
-        self.assertEqual(len(post_button), 1)
-        action = post_button.parents("form").find('input[type=hidden][name="action"]').val()
-
-        # post submitter info
-        r = self.client.post(status_url, {
-            "action": action,
-            "submitter-name": submitter_name,
-            "submitter-email": submitter_email,
-            "approvals_received": True,
-        })
-
-        if r.status_code == 302:
-            submission = Submission.objects.get(name=name)
-            self.assertEqual(submission.submitter, email.utils.formataddr((submitter_name, submitter_email)))
-
-        return r
-
-
-# Transaction.on_commit() requires use of TransactionTestCase, but that has a performance penalty. Replace it
-# with a no-op for testing purposes.
+# Transaction.on_commit() interacts badly with TestCase's transaction behavior. Replace it
+# with a pass-through for testing purposes.
 @mock.patch.object(transaction, 'on_commit', lambda x: x())
 @override_settings(IDTRACKER_BASE_URL='https://datatracker.example.com')
 class ApiSubmissionTests(BaseSubmitTestCase):
+    TASK_TO_MOCK = "ietf.submit.views.process_and_accept_uploaded_submission_task"
+
+    def setUp(self):
+        super().setUp()
+        MeetingFactory(type_id='ietf', date=date_today()+datetime.timedelta(days=60))
+
+    def test_api_submit_tombstone(self):
+        """Tombstone for obsolete API endpoint should return 410 Gone"""
+        url = urlreverse("ietf.submit.views.api_submit_tombstone")
+        self.assertEqual(self.client.get(url).status_code, 410)
+        self.assertEqual(self.client.post(url).status_code, 410)
+
     def test_upload_draft(self):
         """api_submission accepts a submission and queues it for processing"""
         url = urlreverse('ietf.submit.views.api_submission')
@@ -2750,7 +2359,7 @@ class ApiSubmissionTests(BaseSubmitTestCase):
             'xml': xml,
             'user': author.user.username,
         }
-        with mock.patch('ietf.submit.views.process_uploaded_submission_task') as mock_task:
+        with mock.patch(self.TASK_TO_MOCK) as mock_task:
             r = self.client.post(url, data)
         self.assertEqual(r.status_code, 200)
         response = r.json()
@@ -2788,7 +2397,7 @@ class ApiSubmissionTests(BaseSubmitTestCase):
             'replaces': existing_draft.name,
         }
         # mock out the task so we don't call to celery during testing!
-        with mock.patch('ietf.submit.views.process_uploaded_submission_task'):
+        with mock.patch(self.TASK_TO_MOCK):
             r = self.client.post(url, data)
         self.assertEqual(r.status_code, 200)
         submission = Submission.objects.last()
@@ -2806,7 +2415,7 @@ class ApiSubmissionTests(BaseSubmitTestCase):
             'xml': xml,
             'user': 'i.dont.exist@nowhere.example.com',
         }
-        with mock.patch('ietf.submit.views.process_uploaded_submission_task') as mock_task:
+        with mock.patch(self.TASK_TO_MOCK) as mock_task:
             r = self.client.post(url, data)
         self.assertEqual(r.status_code, 400)
         response = r.json()
@@ -2820,7 +2429,7 @@ class ApiSubmissionTests(BaseSubmitTestCase):
             'xml': xml,
             'user': author.user.username,
         }
-        with mock.patch('ietf.submit.views.process_uploaded_submission_task') as mock_task:
+        with mock.patch(self.TASK_TO_MOCK) as mock_task:
             r = self.client.post(url, data)
         self.assertEqual(r.status_code, 400)
         response = r.json()
@@ -2834,7 +2443,7 @@ class ApiSubmissionTests(BaseSubmitTestCase):
             'xml': xml,
             'user': author.user.username,
         }
-        with mock.patch('ietf.submit.views.process_uploaded_submission_task') as mock_task:
+        with mock.patch(self.TASK_TO_MOCK) as mock_task:
             r = self.client.post(url, data)
         self.assertEqual(r.status_code, 400)
         response = r.json()
@@ -2850,7 +2459,7 @@ class ApiSubmissionTests(BaseSubmitTestCase):
             'xml': xml,
             'user': author.user.username,
         }
-        with mock.patch('ietf.submit.views.process_uploaded_submission_task') as mock_task:
+        with mock.patch(self.TASK_TO_MOCK) as mock_task:
             r = self.client.post(url, data)
         self.assertEqual(r.status_code, 400)
         response = r.json()
@@ -2872,7 +2481,7 @@ class ApiSubmissionTests(BaseSubmitTestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(
             r.json(),
-            {'id': str(s.pk), 'state': 'validating'},
+            {'id': str(s.pk), 'state': 'validating', 'state_desc': s.state.name},
         )
 
         s.state_id = 'uploaded'
@@ -2881,13 +2490,31 @@ class ApiSubmissionTests(BaseSubmitTestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(
             r.json(),
-            {'id': str(s.pk), 'state': 'uploaded'},
+            {'id': str(s.pk), 'state': 'uploaded', 'state_desc': s.state.name},
         )
 
         # try an invalid one
         r = self.client.get(urlreverse('ietf.submit.views.api_submission_status', kwargs={'submission_id': '999999'}))
         self.assertEqual(r.status_code, 404)
 
+    def test_upload_blackout(self):
+        """api_submission returns a useful error in the blackout period"""
+        # Put today in the blackout period
+        meeting = Meeting.get_current_meeting()
+        meeting.importantdate_set.create(name_id='idcutoff',date=date_today()-datetime.timedelta(days=2))
+
+        url = urlreverse('ietf.submit.views.api_submission')
+        xml, author = submission_file('draft-somebody-test-00', 'draft-somebody-test-00.xml', None, 'test_submission.xml')
+        data = {
+            'xml': xml,
+            'user': author.user.username,
+        }
+
+        with mock.patch('ietf.submit.views.process_uploaded_submission_task'):
+            r = self.client.post(url, data)
+        self.assertContains(r, 'The last submission time for the I-D submission was', status_code=400)
+
+ 
 
 class SubmissionUploadFormTests(BaseSubmitTestCase):
     def test_check_submission_thresholds(self):
@@ -3061,7 +2688,7 @@ class SubmissionUploadFormTests(BaseSubmitTestCase):
             files=files_dict,
         )
         self.assertFalse(form.is_valid())
-        self.assertIn('A draft cannot replace itself', form.errors['replaces'])
+        self.assertIn('An Internet-Draft cannot replace itself', form.errors['replaces'])
 
         # can't replace non-draft
         review = ReviewFactory()
@@ -3071,17 +2698,19 @@ class SubmissionUploadFormTests(BaseSubmitTestCase):
             files=files_dict,
         )
         self.assertFalse(form.is_valid())
-        self.assertIn('A draft can only replace another draft', form.errors['replaces'])
+        self.assertIn('An Internet-Draft can only replace another Internet-Draft', form.errors['replaces'])
 
         # can't replace RFC
         rfc = WgRfcFactory()
+        draft = WgDraftFactory(states=[("draft", "rfc")])
+        draft.relateddocument_set.create(relationship_id="became_rfc", target=rfc)
         form = SubmissionAutoUploadForm(
             request_factory.get('/some/url'),
-            data={'user': auth.user.username, 'replaces': rfc.name},
+            data={'user': auth.user.username, 'replaces': draft.name},
             files=files_dict,
         )
         self.assertFalse(form.is_valid())
-        self.assertIn('A draft cannot replace an RFC', form.errors['replaces'])
+        self.assertIn('An Internet-Draft cannot replace another Internet-Draft that has become an RFC', form.errors['replaces'])
 
         # can't replace draft approved by iesg
         existing_drafts[0].set_state(State.objects.get(type='draft-iesg', slug='approved'))
@@ -3102,11 +2731,25 @@ class SubmissionUploadFormTests(BaseSubmitTestCase):
         )
         self.assertFalse(form.is_valid())
 
+    def test_invalid_xml(self):
+        """Test error message for invalid XML"""
+        not_xml = SimpleUploadedFile(
+            name="not-xml.xml",
+            content=b"this is not xml at all",
+            content_type="application/xml",
+        )
+        form = SubmissionBaseUploadForm(RequestFactory().post('/some/url'), files={"xml": not_xml})
+        self.assertFalse(form.is_valid())
+        self.assertFormError(
+            form,
+            "xml",
+            "The uploaded file is not valid XML. Please make sure you are uploading the correct file.",
+        )
 
 class AsyncSubmissionTests(BaseSubmitTestCase):
     """Tests of async submission-related tasks"""
-    def test_process_uploaded_submission(self):
-        """process_uploaded_submission should properly process a submission"""
+    def test_process_and_accept_uploaded_submission(self):
+        """process_and_accept_uploaded_submission should properly process a submission"""
         _today = date_today()
         xml, author = submission_file('draft-somebody-test-00', 'draft-somebody-test-00.xml', None, 'test_submission.xml')
         xml_data = xml.read()
@@ -3126,7 +2769,7 @@ class AsyncSubmissionTests(BaseSubmitTestCase):
         self.assertFalse(txt_path.exists())
         html_path = xml_path.with_suffix('.html')
         self.assertFalse(html_path.exists())
-        process_uploaded_submission(submission)
+        process_and_accept_uploaded_submission(submission)
 
         submission = Submission.objects.get(pk=submission.pk)  # refresh
         self.assertEqual(submission.state_id, 'auth', 'accepted submission should be in auth state')
@@ -3144,8 +2787,8 @@ class AsyncSubmissionTests(BaseSubmitTestCase):
         self.assertEqual(submission.file_size, os.stat(txt_path).st_size)
         self.assertIn('Completed submission validation checks', submission.submissionevent_set.last().desc)
 
-    def test_process_uploaded_submission_invalid(self):
-        """process_uploaded_submission should properly process an invalid submission"""
+    def test_process_and_accept_uploaded_submission_invalid(self):
+        """process_and_accept_uploaded_submission should properly process an invalid submission"""
         xml, author = submission_file('draft-somebody-test-00', 'draft-somebody-test-00.xml', None, 'test_submission.xml')
         xml_data = xml.read()
         xml.close()
@@ -3166,7 +2809,7 @@ class AsyncSubmissionTests(BaseSubmitTestCase):
         xml_path = Path(settings.IDSUBMIT_STAGING_PATH) / 'draft-somebody-test-00.xml'
         with xml_path.open('w') as f:
             f.write(xml_data)
-        process_uploaded_submission(submission)
+        process_and_accept_uploaded_submission(submission)
         submission = Submission.objects.get(pk=submission.pk)  # refresh
         self.assertEqual(submission.state_id, 'cancel')
         self.assertIn('not one of the document authors', submission.submissionevent_set.last().desc)
@@ -3182,10 +2825,10 @@ class AsyncSubmissionTests(BaseSubmitTestCase):
         xml_path = Path(settings.IDSUBMIT_STAGING_PATH) / 'draft-somebody-test-00.xml'
         with xml_path.open('w') as f:
             f.write(re.sub(r'<email>.*</email>', '', xml_data))
-        process_uploaded_submission(submission)
+        process_and_accept_uploaded_submission(submission)
         submission = Submission.objects.get(pk=submission.pk)  # refresh
         self.assertEqual(submission.state_id, 'cancel')
-        self.assertIn('Missing email address', submission.submissionevent_set.last().desc)
+        self.assertIn('Email address not found for all authors', submission.submissionevent_set.last().desc)
 
         # no title
         submission = SubmissionFactory(
@@ -3198,7 +2841,7 @@ class AsyncSubmissionTests(BaseSubmitTestCase):
         xml_path = Path(settings.IDSUBMIT_STAGING_PATH) / 'draft-somebody-test-00.xml'
         with xml_path.open('w') as f:
             f.write(re.sub(r'<title>.*</title>', '<title></title>', xml_data))
-        process_uploaded_submission(submission)
+        process_and_accept_uploaded_submission(submission)
         submission = Submission.objects.get(pk=submission.pk)  # refresh
         self.assertEqual(submission.state_id, 'cancel')
         self.assertIn('Could not extract a valid title', submission.submissionevent_set.last().desc)
@@ -3214,10 +2857,10 @@ class AsyncSubmissionTests(BaseSubmitTestCase):
         xml_path = Path(settings.IDSUBMIT_STAGING_PATH) / 'draft-different-name-00.xml'
         with xml_path.open('w') as f:
             f.write(xml_data)
-        process_uploaded_submission(submission)
+        process_and_accept_uploaded_submission(submission)
         submission = Submission.objects.get(pk=submission.pk)  # refresh
         self.assertEqual(submission.state_id, 'cancel')
-        self.assertIn('draft filename disagrees', submission.submissionevent_set.last().desc)
+        self.assertIn('Submission rejected: XML Internet-Draft filename', submission.submissionevent_set.last().desc)
 
         # rev mismatch
         submission = SubmissionFactory(
@@ -3230,10 +2873,10 @@ class AsyncSubmissionTests(BaseSubmitTestCase):
         xml_path = Path(settings.IDSUBMIT_STAGING_PATH) / 'draft-somebody-test-01.xml'
         with xml_path.open('w') as f:
             f.write(xml_data)
-        process_uploaded_submission(submission)
+        process_and_accept_uploaded_submission(submission)
         submission = Submission.objects.get(pk=submission.pk)  # refresh
         self.assertEqual(submission.state_id, 'cancel')
-        self.assertIn('revision disagrees', submission.submissionevent_set.last().desc)
+        self.assertIn('Submission rejected: XML Internet-Draft revision', submission.submissionevent_set.last().desc)
 
         # not xml
         submission = SubmissionFactory(
@@ -3246,10 +2889,10 @@ class AsyncSubmissionTests(BaseSubmitTestCase):
         txt_path = Path(settings.IDSUBMIT_STAGING_PATH) / 'draft-somebody-test-00.txt'
         with txt_path.open('w') as f:
             f.write(txt_data)
-        process_uploaded_submission(submission)
+        process_and_accept_uploaded_submission(submission)
         submission = Submission.objects.get(pk=submission.pk)  # refresh
         self.assertEqual(submission.state_id, 'cancel')
-        self.assertIn('Only XML draft submissions', submission.submissionevent_set.last().desc)
+        self.assertIn('Only XML Internet-Draft submissions', submission.submissionevent_set.last().desc)
 
         # wrong state
         submission = SubmissionFactory(
@@ -3263,7 +2906,7 @@ class AsyncSubmissionTests(BaseSubmitTestCase):
         with xml_path.open('w') as f:
             f.write(xml_data)
         with mock.patch('ietf.submit.utils.process_submission_xml') as mock_proc_xml:
-            process_uploaded_submission(submission)
+            process_and_accept_uploaded_submission(submission)
         submission = Submission.objects.get(pk=submission.pk)  # refresh
         self.assertFalse(mock_proc_xml.called, 'Should not process submission not in "validating" state')
         self.assertEqual(submission.state_id, 'uploaded', 'State should not be changed')
@@ -3291,237 +2934,268 @@ class AsyncSubmissionTests(BaseSubmitTestCase):
                     symbol='x',
                 )
         ):
-            process_uploaded_submission(submission)
+            process_and_accept_uploaded_submission(submission)
         submission = Submission.objects.get(pk=submission.pk)  # refresh
         self.assertEqual(submission.state_id, 'cancel')
         self.assertIn('fake failure', submission.submissionevent_set.last().desc)
 
 
-    @mock.patch('ietf.submit.tasks.process_uploaded_submission')
-    def test_process_uploaded_submission_task(self, mock_method):
-        """process_uploaded_submission_task task should properly call its method"""
+    @mock.patch('ietf.submit.tasks.process_and_accept_uploaded_submission')
+    def test_process_and_accept_uploaded_submission_task(self, mock_method):
+        """process_and_accept_uploaded_submission_task task should properly call its method"""
         s = SubmissionFactory()
-        process_uploaded_submission_task(s.pk)
+        process_and_accept_uploaded_submission_task(s.pk)
         self.assertEqual(mock_method.call_count, 1)
         self.assertEqual(mock_method.call_args.args, (s,))
 
-    @mock.patch('ietf.submit.tasks.process_uploaded_submission')
-    def test_process_uploaded_submission_task_ignores_invalid_id(self, mock_method):
-        """process_uploaded_submission_task should ignore an invalid submission_id"""
+    @mock.patch('ietf.submit.tasks.process_and_accept_uploaded_submission')
+    def test_process_and_accept_uploaded_submission_task_ignores_invalid_id(self, mock_method):
+        """process_and_accept_uploaded_submission_task should ignore an invalid submission_id"""
         SubmissionFactory()  # be sure there is a Submission
         bad_pk = 9876
         self.assertEqual(Submission.objects.filter(pk=bad_pk).count(), 0)
-        process_uploaded_submission_task(bad_pk)
+        process_and_accept_uploaded_submission_task(bad_pk)
         self.assertEqual(mock_method.call_count, 0)
 
-    def test_process_submission_text_consistency_checks(self):
-        """process_submission_text should check draft metadata against submission"""
-        submission = SubmissionFactory(
-            name='draft-somebody-test',
-            rev='00',
-            title='Correct Draft Title',
+    def test_process_submission_xml(self):
+        xml_path = Path(settings.IDSUBMIT_STAGING_PATH) / "draft-somebody-test-00.xml"
+        xml, _ = submission_file(
+            "draft-somebody-test-00",
+            "draft-somebody-test-00.xml",
+            None,
+            "test_submission.xml",
+            title="Correct Draft Title",
         )
-        txt_path = Path(settings.IDSUBMIT_STAGING_PATH) / 'draft-somebody-test-00.txt'
+        xml_contents = xml.read()
+        xml_path.write_text(xml_contents)
+        output = process_submission_xml("draft-somebody-test", "00")
+        self.assertEqual(output["filename"], "draft-somebody-test")
+        self.assertEqual(output["rev"], "00")
+        self.assertEqual(output["title"], "Correct Draft Title")
+        self.assertIsNone(output["abstract"])
+        self.assertEqual(len(output["authors"]), 1)  # not checking in detail, parsing is unreliable
+        self.assertEqual(output["document_date"], date_today())
+        self.assertIsNone(output["pages"])
+        self.assertIsNone(output["words"])
+        self.assertIsNone(output["first_two_pages"])
+        self.assertIsNone(output["file_size"])
+        self.assertIsNone(output["formal_languages"])
+        self.assertEqual(output["xml_version"], "3")
+
+        # Should behave on missing or partial <date> elements
+        xml_path.write_text(re.sub(r"<date.+>", "", xml_contents))  # strip <date...> entirely
+        output = process_submission_xml("draft-somebody-test", "00")
+        self.assertEqual(output["document_date"], None)
+
+        xml_path.write_text(re.sub(r"<date year=.+ month", "<date month", xml_contents))  # remove year
+        output = process_submission_xml("draft-somebody-test", "00")
+        self.assertEqual(output["document_date"], date_today())
+
+        xml_path.write_text(re.sub(r"(<date.+) month=.+day=(.+>)", r"\1 day=\2", xml_contents))  # remove month
+        output = process_submission_xml("draft-somebody-test", "00")
+        self.assertEqual(output["document_date"], date_today())
+
+        xml_path.write_text(re.sub(r"<date(.+) day=.+>", r"<date\1>", xml_contents))  # remove day
+        output = process_submission_xml("draft-somebody-test", "00")
+        self.assertEqual(output["document_date"], date_today())
+
+        # name mismatch
+        xml, _ = submission_file(
+            "draft-somebody-wrong-name-00",  # name that appears in the file
+            "draft-somebody-test-00.xml",
+            None,
+            "test_submission.xml",
+            title="Correct Draft Title",
+        )
+        xml_path.write_text(xml.read())
+        with self.assertRaisesMessage(SubmissionError, "disagrees with submission filename"):
+            process_submission_xml("draft-somebody-test", "00")
+
+        # rev mismatch
+        xml, _ = submission_file(
+            "draft-somebody-test-01",  # name that appears in the file
+            "draft-somebody-test-00.xml",
+            None,
+            "test_submission.xml",
+            title="Correct Draft Title",
+        )
+        xml_path.write_text(xml.read())
+        with self.assertRaisesMessage(SubmissionError, "disagrees with submission revision"):
+            process_submission_xml("draft-somebody-test", "00")
+
+        # missing title
+        xml, _ = submission_file(
+            "draft-somebody-test-00",  # name that appears in the file
+            "draft-somebody-test-00.xml",
+            None,
+            "test_submission.xml",
+            title="",
+        )
+        xml_path.write_text(xml.read())
+        with self.assertRaisesMessage(SubmissionError, "Could not extract a valid title"):
+            process_submission_xml("draft-somebody-test", "00")
+
+    def test_process_submission_text(self):
+        txt_path = Path(settings.IDSUBMIT_STAGING_PATH) / "draft-somebody-test-00.txt"
+        txt, _ = submission_file(
+            "draft-somebody-test-00",
+            "draft-somebody-test-00.txt",
+            None,
+            "test_submission.txt",
+            title="Correct Draft Title",
+        )
+        txt_path.write_text(txt.read())
+        output = process_submission_text("draft-somebody-test", "00")
+        self.assertEqual(output["filename"], "draft-somebody-test")
+        self.assertEqual(output["rev"], "00")
+        self.assertEqual(output["title"], "Correct Draft Title")
+        self.assertEqual(output["abstract"].strip(), "This document describes how to test tests.")
+        self.assertEqual(len(output["authors"]), 1)  # not checking in detail, parsing is unreliable
+        self.assertLessEqual(output["document_date"] - date_today(), datetime.timedelta(days=1))
+        self.assertEqual(output["pages"], 2)
+        self.assertGreater(output["words"], 0)  # make sure it got something
+        self.assertGreater(len(output["first_two_pages"]), 0)  # make sure it got something
+        self.assertGreater(output["file_size"], 0)  # make sure it got something
+        self.assertEqual(output["formal_languages"].count(), 1)
+        self.assertIsNone(output["xml_version"])
 
         # name mismatch
         txt, _ = submission_file(
-            'draft-somebody-wrong-name-00',  # name that appears in the file
-            'draft-somebody-test-00.xml',
+            "draft-somebody-wrong-name-00",  # name that appears in the file
+            "draft-somebody-test-00.txt",
             None,
-            'test_submission.txt',
-            title='Correct Draft Title',
+            "test_submission.txt",
+            title="Correct Draft Title",
         )
-        txt_path.open('w').write(txt.read())
+        with txt_path.open('w') as fd:
+            fd.write(txt.read())
+        txt.close()
         with self.assertRaisesMessage(SubmissionError, 'disagrees with submission filename'):
-            process_submission_text(submission)
+            process_submission_text("draft-somebody-test", "00")
 
         # rev mismatch
         txt, _ = submission_file(
-            'draft-somebody-test-01',  # name that appears in the file
-            'draft-somebody-test-00.xml',
+            "draft-somebody-test-01",  # name that appears in the file
+            "draft-somebody-test-00.txt",
             None,
-            'test_submission.txt',
-            title='Correct Draft Title',
+            "test_submission.txt",
+            title="Correct Draft Title",
         )
-        txt_path.open('w').write(txt.read())
+        with txt_path.open('w') as fd:
+            fd.write(txt.read())
+        txt.close()
         with self.assertRaisesMessage(SubmissionError, 'disagrees with submission revision'):
-            process_submission_text(submission)
+            process_submission_text("draft-somebody-test", "00")
 
-        # title mismatch
-        txt, _ = submission_file(
-            'draft-somebody-test-00',  # name that appears in the file
-            'draft-somebody-test-00.xml',
-            None,
-            'test_submission.txt',
-            title='Not Correct Draft Title',
+    def test_process_and_validate_submission(self):
+        xml_data = {
+            "title": "The Title",
+            "authors": [{
+                "name": "Jane Doe",
+                "email": "jdoe@example.com",
+                "affiliation": "Test Centre",
+                "country": "UK",
+            }],
+            "xml_version": "3",
+        }
+        text_data = {
+            "title": "The Title",
+            "abstract": "This is an abstract.",
+            "authors": [{
+                "name": "John Doh",
+                "email": "ignored@example.com",
+                "affiliation": "Ignored",
+                "country": "CA",
+            }],
+            "document_date": date_today(),
+            "pages": 25,
+            "words": 1234,
+            "first_two_pages": "Pages One and Two",
+            "file_size": 4321,
+            "formal_languages": FormalLanguageName.objects.none(),
+        }
+        submission = SubmissionFactory(
+            state_id="validating",
+            file_types=".xml,.txt",
         )
-        txt_path.open('w').write(txt.read())
-        with self.assertRaisesMessage(SubmissionError, 'disagrees with submission title'):
-            process_submission_text(submission)
+        with mock.patch("ietf.submit.utils.process_submission_xml", return_value=xml_data):
+            with mock.patch("ietf.submit.utils.process_submission_text", return_value=text_data):
+                with mock.patch("ietf.submit.utils.render_missing_formats") as mock_render:
+                    with mock.patch("ietf.submit.utils.apply_checkers") as mock_checkers:
+                        process_and_validate_submission(submission)
+        self.assertTrue(mock_render.called)
+        self.assertTrue(mock_checkers.called)
+        submission = Submission.objects.get(pk=submission.pk)
+        self.assertEqual(submission.title, text_data["title"])
+        self.assertEqual(submission.abstract, text_data["abstract"])
+        self.assertEqual(submission.authors, xml_data["authors"])
+        self.assertEqual(submission.document_date, text_data["document_date"])
+        self.assertEqual(submission.pages, text_data["pages"])
+        self.assertEqual(submission.words, text_data["words"])
+        self.assertEqual(submission.first_two_pages, text_data["first_two_pages"])
+        self.assertEqual(submission.file_size, text_data["file_size"])
+        self.assertEqual(submission.xml_version, xml_data["xml_version"])
 
     def test_status_of_validating_submission(self):
         s = SubmissionFactory(state_id='validating')
         url = urlreverse('ietf.submit.views.submission_status', kwargs={'submission_id': s.pk})
         r = self.client.get(url)
         self.assertContains(r, s.name)
-        self.assertContains(r, 'still being processed and validated', status_code=200)
+        self.assertContains(r, 'This submission is being processed and validated.', status_code=200)
 
-    @override_settings(IDSUBMIT_MAX_VALIDATION_TIME=datetime.timedelta(minutes=30))
+    @override_settings(
+        IDSUBMIT_MAX_VALIDATION_TIME=datetime.timedelta(minutes=30),
+        IDSUBMIT_EXPIRATION_AGE=datetime.timedelta(minutes=90),
+    )
     def test_cancel_stale_submissions(self):
+        # these will be lists of (Submission, "state_id") pairs
+        submissions_to_skip = []
+        submissions_to_cancel = []
+
+        # submissions in the validating state
         fresh_submission = SubmissionFactory(state_id='validating')
         fresh_submission.submissionevent_set.create(
             desc='fake created event',
             time=timezone.now() - datetime.timedelta(minutes=15),
         )
+        submissions_to_skip.append((fresh_submission, "validating"))
+
         stale_submission = SubmissionFactory(state_id='validating')
         stale_submission.submissionevent_set.create(
             desc='fake created event',
             time=timezone.now() - datetime.timedelta(minutes=30, seconds=1),
         )
+        submissions_to_cancel.append((stale_submission, "validating"))
+        
+        # submissions in other states
+        for state in DraftSubmissionStateName.objects.filter(used=True).exclude(slug="validating"):
+            to_skip = SubmissionFactory(state_id=state.pk)
+            to_skip.submissionevent_set.create(
+                desc="fake created event",
+                time=timezone.now() - datetime.timedelta(minutes=45),  # would be canceled if it were "validating"
+            )
+            submissions_to_skip.append((to_skip, state.pk))
+            to_expire = SubmissionFactory(state_id=state.pk)
+            to_expire.submissionevent_set.create(
+                desc="fake created event",
+                time=timezone.now() - datetime.timedelta(minutes=90, seconds=1),
+            )
+            if state.pk in ["posted", "cancel"]:
+                submissions_to_skip.append((to_expire, state.pk))  # these ones should not be expired regardless of age
+            else:
+                submissions_to_cancel.append(((to_expire, state.pk)))
 
         cancel_stale_submissions()
 
-        fresh_submission = Submission.objects.get(pk=fresh_submission.pk)
-        self.assertEqual(fresh_submission.state_id, 'validating')
-        self.assertEqual(fresh_submission.submissionevent_set.count(), 1)
+        for _subm, original_state_id in submissions_to_skip:
+            subm = Submission.objects.get(pk=_subm.pk)
+            self.assertEqual(subm.state_id, original_state_id)
+            self.assertEqual(subm.submissionevent_set.count(), 1)
 
-        stale_submission = Submission.objects.get(pk=stale_submission.pk)
-        self.assertEqual(stale_submission.state_id, 'cancel')
-        self.assertEqual(stale_submission.submissionevent_set.count(), 2)
-
-
-class ApiSubmitTests(BaseSubmitTestCase):
-    def setUp(self):
-        super().setUp()
-        # break early in case of missing configuration
-        self.assertTrue(os.path.exists(settings.IDSUBMIT_IDNITS_BINARY))
-        MeetingFactory(type_id='ietf', date=date_today()+datetime.timedelta(days=60))
-
-    def do_post_submission(self, rev, author=None, name=None, group=None, email=None, title=None, year=None):
-        url = urlreverse('ietf.submit.views.api_submit')
-        if author is None:
-            author = PersonFactory()
-        if name is None:
-            slug = re.sub('[^a-z0-9-]+', '', author.ascii_parts()[3].lower())
-            name = 'draft-%s-foo' % slug
-        if email is None:
-            email = author.user.username
-        # submit
-        data = {}
-        data['xml'], author = submission_file(f'{name}-{rev}', f'{name}-{rev}.xml', group, "test_submission.xml", author=author, email=email, title=title, year=year)
-        data['user'] = email
-        r = self.client.post(url, data)
-        return r, author, name
-
-    def test_api_submit_info(self):
-        url = urlreverse('ietf.submit.views.api_submit')
-        r = self.client.get(url)
-        expected = "A simplified draft submission interface, intended for automation"
-        self.assertContains(r, expected, status_code=200)
-
-    def test_api_submit_bad_method(self):
-        url = urlreverse('ietf.submit.views.api_submit')
-        r = self.client.put(url)
-        self.assertEqual(r.status_code, 405)
-
-    def test_api_submit_ok(self):
-        r, author, name = self.do_post_submission('00')
-        expected = "Upload of %s OK, confirmation requests sent to:\n  %s" % (name, author.formatted_email().replace('\n',''))
-        self.assertContains(r, expected, status_code=200)
-
-    def test_api_submit_secondary_email_active(self):
-        person = PersonFactory()
-        email = EmailFactory(person=person)
-        r, author, name = self.do_post_submission('00', author=person, email=email.address)
-        for expected in [
-                "Upload of %s OK, confirmation requests sent to:" % (name, ),
-                author.formatted_email().replace('\n',''),
-            ]:
-            self.assertContains(r, expected, status_code=200)
-
-    def test_api_submit_secondary_email_inactive(self):
-        person = PersonFactory()
-        prim = person.email()
-        prim.primary = True
-        prim.save()
-        email = EmailFactory(person=person, active=False)
-        r, author, name = self.do_post_submission('00', author=person, email=email.address)
-        expected = "No such user: %s" % email.address
-        self.assertContains(r, expected, status_code=400)
-
-    def test_api_submit_no_user(self):
-        email='nonexistant.user@example.org'
-        r, author, name = self.do_post_submission('00', email=email)
-        expected = "No such user: %s" % email
-        self.assertContains(r, expected, status_code=400)
-
-    def test_api_submit_no_person(self):
-        user = UserFactory()
-        email = user.username
-        r, author, name = self.do_post_submission('00', email=email)
-        expected = "No person with username %s" % email
-        self.assertContains(r, expected, status_code=400)
-
-    def test_api_submit_wrong_revision(self):
-        r, author, name = self.do_post_submission('01')
-        expected = "Invalid revision (revision 00 is expected)"
-        self.assertContains(r, expected, status_code=400)
-
-    def test_api_submit_update_existing_submissiondocevent_rev(self):
-        draft, _ = create_draft_submission_with_rev_mismatch(rev='01')
-        r, _, __ = self.do_post_submission(rev='01', name=draft.name)
-        expected = "Submission failed"
-        self.assertContains(r, expected, status_code=409)
-
-    def test_api_submit_update_later_submissiondocevent_rev(self):
-        draft, _ = create_draft_submission_with_rev_mismatch(rev='02')
-        r, _, __ = self.do_post_submission(rev='01', name=draft.name)
-        expected = "Submission failed"
-        self.assertContains(r, expected, status_code=409)
-
-    def test_api_submit_pending_submission(self):
-        r, author, name = self.do_post_submission('00')
-        expected = "Upload of"
-        self.assertContains(r, expected, status_code=200)
-        r, author, name = self.do_post_submission('00', author=author, name=name)
-        expected = "A submission with same name and revision is currently being processed"
-        self.assertContains(r, expected, status_code=400)
-
-    def test_api_submit_no_title(self):
-        r, author, name = self.do_post_submission('00', title=" ")
-        expected = "Could not extract a valid title from the upload"
-        self.assertContains(r, expected, status_code=400)
-
-    def test_api_submit_failed_idnits(self):
-        r, author, name = self.do_post_submission('00', year="2010")
-        expected = "Document date must be within 3 days of submission date"
-        self.assertContains(r, expected, status_code=400)
-
-    def test_api_submit_keeps_extresources(self):
-        """API submit should not disturb doc external resources
-        
-        Tests that the submission inherits the existing doc's docextresource_set.
-        Relies on separate testing that Submission external_resources will be
-        handled appropriately.
-        """
-        draft = WgDraftFactory()
-
-        # add an external resource
-        self.assertEqual(draft.docextresource_set.count(), 0)
-        extres = draft.docextresource_set.create(
-            name_id='faq',
-            display_name='this is a display name',
-            value='https://example.com/faq-for-test.html',
-        )
-        
-        r, _, __ = self.do_post_submission('01', name=draft.name)
-        self.assertEqual(r.status_code, 200)
-        # draft = Document.objects.get(pk=draft.pk)  # update the draft
-        sub = Submission.objects.get(name=draft.name)
-        self.assertEqual(
-            [str(r) for r in sub.external_resources.all()],
-            [str(extres)],
-        )
+        for _subm, _ in submissions_to_cancel:
+            subm = Submission.objects.get(pk=_subm.pk)
+            self.assertEqual(subm.state_id, "cancel")
+            self.assertEqual(subm.submissionevent_set.count(), 2)
 
         
 class RefsTests(BaseSubmitTestCase):
@@ -3539,25 +3213,9 @@ class RefsTests(BaseSubmitTestCase):
 
 
 class PostSubmissionTests(BaseSubmitTestCase):
-    @override_settings(RFC_FILE_TYPES=('txt', 'xml'), IDSUBMIT_FILE_TYPES=('pdf', 'md'))
-    def test_find_submission_filenames_rfc(self):
-        """Posting an RFC submission should use RFC_FILE_TYPES"""
-        rfc = IndividualRfcFactory()
-        path = Path(self.staging_dir)
-        for ext in ['txt', 'xml', 'pdf', 'md']:
-            (path / f'{rfc.name}-{rfc.rev}.{ext}').touch()
-        files = find_submission_filenames(rfc)
-        self.assertCountEqual(
-            files,
-            {
-                'txt': f'{path}/{rfc.name}-{rfc.rev}.txt',
-                'xml': f'{path}/{rfc.name}-{rfc.rev}.xml',
-                # should NOT find the pdf or md
-            }
-        )
 
     @override_settings(RFC_FILE_TYPES=('txt', 'xml'), IDSUBMIT_FILE_TYPES=('pdf', 'md'))
-    def test_find_submission_filenames_draft(self):
+    def test_find_submission_filenames(self):
         """Posting an I-D submission should use IDSUBMIT_FILE_TYPES"""
         draft = WgDraftFactory()
         path = Path(self.staging_dir)
@@ -3638,3 +3296,117 @@ class ValidateSubmissionFilenameTests(BaseSubmitTestCase):
 
         msg = validate_submission_rev(new_wg_doc.name, '02')
         self.assertIsNone(msg)
+
+class TestOldNamesAreProtected(BaseSubmitTestCase):
+    
+    def test_submit_case_conflited_name_fails(self):
+        WgDraftFactory(name="draft-something-HasCapitalLetters")
+        with self.assertRaisesMessage(ValidationError, "Case-conflicting draft name found"):
+            SubmissionBaseUploadForm.check_for_old_uppercase_collisions("draft-something-hascapitalletters")
+        url = urlreverse("ietf.submit.views.upload_submission")
+        files = {}
+        files["xml"], _ = submission_file("draft-something-hascapitalletters-00", "draft-something-hascapitalletters-00.xml", None, "test_submission.xml")
+        r = self.post_to_upload_submission(url, files)
+        self.assertContains(r,"Case-conflicting draft name found",status_code=200)
+
+
+class SubmissionStatusTests(BaseSubmitTestCase):
+    """Tests of the submission_status view
+
+    Many tests are interspersed in the monolithic tests above. We can aspire to break these
+    out more modularly, though.
+    """
+
+    def test_submission_checks(self):
+        for state_slug in ("uploaded", "cancel", "posted"):
+            submission = SubmissionFactory(state_id=state_slug)
+            url = urlreverse(
+                "ietf.submit.views.submission_status",
+                kwargs={"submission_id": submission.pk},
+            )
+            # No checks
+            r = self.client.get(url)
+            self.assertContains(
+                r,
+                "No submission checks were applied to your Internet-Draft.",
+                status_code=200,
+            )
+            # Inapplicable check
+            submission.checks.create(
+                checker="yang validation", passed=None, message="Yang message"
+            )
+            r = self.client.get(url)
+            self.assertContains(
+                r,
+                "No submission checks were applied to your Internet-Draft.",
+                status_code=200,
+            )
+            # Passed check
+            submission.checks.create(
+                checker="idnits check", passed=True, message="idnits ok"
+            )
+            r = self.client.get(url)
+            self.assertContains(
+                r,
+                "Your Internet-Draft has been verified to pass the submission checks.",
+                status_code=200,
+            )
+            # Failed check + passed check
+            submission.checks.filter(checker="yang validation").update(passed=False)
+            r = self.client.get(url)
+            self.assertContains(
+                r,
+                "Your Internet-Draft failed at least one submission check.",
+                status_code=200,
+            )
+
+
+class YangCheckerTests(TestCase):
+    @mock.patch("ietf.submit.utils.apply_yang_checker_to_draft")
+    def test_run_all_yang_model_checks(self, mock_apply):
+        active_drafts = WgDraftFactory.create_batch(3)
+        WgDraftFactory(states=[("draft", "expired")])
+        run_all_yang_model_checks()
+        self.assertEqual(mock_apply.call_count, 3)
+        self.assertCountEqual(
+            [args[0][1] for args in mock_apply.call_args_list],
+            active_drafts,
+        )
+
+    def test_apply_yang_checker_to_draft(self):
+        draft = WgDraftFactory()
+        submission = SubmissionFactory(name=draft.name, rev=draft.rev)
+        submission.checks.create(checker="my-checker")
+        checker = mock.Mock()
+        checker.name = "my-checker"
+        checker.symbol = "X"
+        checker.check_file_txt.return_value = (True, "whee", None, None, {})
+        apply_yang_checker_to_draft(checker, draft)
+        self.assertEqual(checker.check_file_txt.call_args, mock.call(draft.get_file_name()))
+
+
+@override_settings(IDSUBMIT_REPOSITORY_PATH="/some/path/", IDSUBMIT_STAGING_PATH="/some/other/path")
+class SubmissionErrorTests(TestCase):
+    def test_sanitize_message(self):
+        sanitized = SubmissionError.sanitize_message(
+            "This refers to /some/path/with-a-file\n"
+            "and also /some/other/path/with-a-different-file isn't that neat?\n"
+            "and has /some/path//////with-slashes"
+        )
+        self.assertEqual(
+            sanitized,
+            "This refers to **/with-a-file\n"
+            "and also **/with-a-different-file isn't that neat?\n"
+            "and has **/with-slashes"
+        )
+    
+    @mock.patch.object(SubmissionError, "sanitize_message")
+    def test_submissionerror(self, mock_sanitize_message):
+        SubmissionError()
+        self.assertFalse(mock_sanitize_message.called)
+        SubmissionError("hi", "there")
+        self.assertTrue(mock_sanitize_message.called)
+        self.assertCountEqual(
+            mock_sanitize_message.call_args_list,
+            [mock.call("hi"), mock.call("there")],
+        )
