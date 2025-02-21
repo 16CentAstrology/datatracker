@@ -1,12 +1,17 @@
-# Copyright The IETF Trust 2021, All Rights Reserved
+# Copyright The IETF Trust 2021-2024, All Rights Reserved
 # -*- coding: utf-8 -*-
 """Tests of models in the Meeting application"""
 import datetime
 
 from mock import patch
 
+from django.conf import settings
+from django.test import override_settings
+
+import ietf.meeting.models
 from ietf.group.factories import GroupFactory, GroupHistoryFactory
-from ietf.meeting.factories import MeetingFactory, SessionFactory, AttendedFactory
+from ietf.meeting.factories import MeetingFactory, SessionFactory, AttendedFactory, SessionPresentationFactory
+from ietf.meeting.models import Session
 from ietf.stats.factories import MeetingRegistrationFactory
 from ietf.utils.test_utils import TestCase
 from ietf.utils.timezone import date_today, datetime_today
@@ -116,7 +121,80 @@ class MeetingTests(TestCase):
 
 
 class SessionTests(TestCase):
-    def test_chat_archive_url_with_jabber(self):
+    def test_chat_archive_url(self):
+        session = SessionFactory(
+            meeting__date=datetime.date.today(),
+            meeting__number=120,  # needs to use proceedings_format_version > 1
+        )
+        with override_settings():
+            if hasattr(settings, 'CHAT_ARCHIVE_URL_PATTERN'):
+                del settings.CHAT_ARCHIVE_URL_PATTERN
+            self.assertEqual(session.chat_archive_url(), session.chat_room_url())
+            settings.CHAT_ARCHIVE_URL_PATTERN = 'http://chat.example.com'
+            self.assertEqual(session.chat_archive_url(), 'http://chat.example.com')
+            chatlog = SessionPresentationFactory(session=session, document__type_id='chatlog').document
+            self.assertEqual(session.chat_archive_url(), chatlog.get_href())
+
         # datatracker 8.8.0 rolled out on 2022-07-15. Before that, chat logs were jabber logs hosted at www.ietf.org.
         session_with_jabber = SessionFactory(group__acronym='fakeacronym', meeting__date=datetime.date(2022,7,14))
         self.assertEqual(session_with_jabber.chat_archive_url(), 'https://www.ietf.org/jabber/logs/fakeacronym?C=M;O=D')
+        chatlog = SessionPresentationFactory(session=session_with_jabber, document__type_id='chatlog').document
+        self.assertEqual(session_with_jabber.chat_archive_url(), chatlog.get_href())
+
+    def test_chat_room_name(self):
+        session = SessionFactory(group__acronym='xyzzy')
+        self.assertEqual(session.chat_room_name(), 'xyzzy')
+        session.type_id = 'plenary'
+        self.assertEqual(session.chat_room_name(), 'plenary')
+        session.chat_room = 'fnord'
+        self.assertEqual(session.chat_room_name(), 'fnord')
+
+    def test_alpha_str(self):
+        self.assertEqual(Session._alpha_str(0), "a")
+        self.assertEqual(Session._alpha_str(1), "b")
+        self.assertEqual(Session._alpha_str(25), "z")
+        self.assertEqual(Session._alpha_str(26), "aa")
+        self.assertEqual(Session._alpha_str(27 * 26 - 1), "zz")
+        self.assertEqual(Session._alpha_str(27 * 26), "aaa")
+
+    @patch.object(ietf.meeting.models.Session, "_session_recording_url_label", return_value="LABEL")
+    def test_session_recording_url(self, mock):
+        for session_type in ["ietf", "interim"]:
+            session = SessionFactory(meeting__type_id=session_type)
+            with override_settings():
+                if hasattr(settings, "MEETECHO_SESSION_RECORDING_URL"):
+                    del settings.MEETECHO_SESSION_RECORDING_URL
+                self.assertIsNone(session.session_recording_url())
+    
+                settings.MEETECHO_SESSION_RECORDING_URL = "http://player.example.com"
+                self.assertEqual(session.session_recording_url(), "http://player.example.com")
+    
+                settings.MEETECHO_SESSION_RECORDING_URL = "http://player.example.com?{session_label}"
+                self.assertEqual(session.session_recording_url(), "http://player.example.com?LABEL")
+
+                session.meetecho_recording_name="actualname"
+                session.save()
+                self.assertEqual(session.session_recording_url(), "http://player.example.com?actualname")
+
+    def test_session_recording_url_label_ietf(self):
+        session = SessionFactory(
+            meeting__type_id='ietf',
+            meeting__date=date_today(),
+            meeting__number="123",
+            group__acronym="acro",
+        )
+        session_time = session.official_timeslotassignment().timeslot.time
+        self.assertEqual(
+            f"IETF123-ACRO-{session_time:%Y%m%d-%H%M}",  # n.b., time in label is UTC
+            session._session_recording_url_label())
+
+    def test_session_recording_url_label_interim(self):
+        session = SessionFactory(
+            meeting__type_id='interim',
+            meeting__date=date_today(),
+            group__acronym="acro",
+        )
+        session_time = session.official_timeslotassignment().timeslot.time
+        self.assertEqual(
+            f"IETF-ACRO-{session_time:%Y%m%d-%H%M}",  # n.b., time in label is UTC
+            session._session_recording_url_label())

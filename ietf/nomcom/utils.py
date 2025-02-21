@@ -1,4 +1,4 @@
-# Copyright The IETF Trust 2012-2022, All Rights Reserved
+# Copyright The IETF Trust 2012-2023, All Rights Reserved
 # -*- coding: utf-8 -*-
 
 
@@ -12,9 +12,11 @@ import tempfile
 
 from collections import defaultdict
 from email import message_from_string, message_from_bytes
+from email.errors import HeaderParseError
 from email.header import decode_header
 from email.iterators import typed_subpart_iterator
 from email.utils import parseaddr
+from textwrap import dedent
 
 from django.db.models import Q, Count
 from django.conf import settings
@@ -29,7 +31,8 @@ from ietf.doc.models import DocEvent, NewRevisionDocEvent
 from ietf.group.models import Group, Role
 from ietf.person.models import Email, Person
 from ietf.mailtrigger.utils import gather_address_lists
-from ietf.meeting.models import Meeting, Attended
+from ietf.meeting.models import Meeting
+from ietf.meeting.utils import participants_for_meeting
 from ietf.utils.pipe import pipe
 from ietf.utils.mail import send_mail_text, send_mail, get_payload_text
 from ietf.utils.log import log
@@ -65,8 +68,11 @@ DEFAULT_NOMCOM_TEMPLATES = [HOME_TEMPLATE,
                         ]
 
 # See RFC8713 section 4.15
+# This potentially over-disqualifies past nomcom chairs if some 
+# nomcom 2+ nomcoms ago is still in the active state
 DISQUALIFYING_ROLE_QUERY_EXPRESSION = (   Q(group__acronym__in=['isocbot', 'ietf-trust', 'llc-board', 'iab'], name_id__in=['member', 'chair'])
                                         | Q(group__type_id='area', group__state='active',name_id='ad')
+                                        | Q(group__type_id='nomcom', group__state='active', name_id='chair')
                                       )
 
 
@@ -83,26 +89,21 @@ def get_year_by_nomcom(nomcom):
     return m.group(0)
 
 
-def get_user_email(user):
-    # a user object already has an email field, but we don't want to
-    # overwrite anything that might be there, and we don't know that
-    # what's there is the right thing, so we cache the lookup results in a
-    # separate attribute
-    if not hasattr(user, "_email_cache"):
-        user._email_cache = None
-        if hasattr(user, "person"):
-            emails = user.person.email_set.filter(active=True).order_by('-time')
-            if emails:
-                user._email_cache = emails[0]
-                for email in emails:
-                    if email.address == user.username:
-                        user._email_cache = email
+def get_person_email(person):
+    if not hasattr(person, "_email_cache"):
+        person._email_cache = None
+        emails = person.email_set.filter(active=True).order_by('-time')
+        if emails:
+            person._email_cache = emails[0]
+            for email in emails:
+                if email.address.lower() == person.user.username.lower():
+                    person._email_cache = email
         else:
             try: 
-                user._email_cache = Email.objects.get(address=user.username)
+                person._email_cache = Email.objects.get(address=person.user.username)
             except ObjectDoesNotExist:
                 pass
-    return user._email_cache
+    return person._email_cache
 
 def get_hash_nominee_position(date, nominee_position_id):
     return hmac.new(settings.NOMCOM_APP_SECRET, f"{date}{nominee_position_id}".encode('utf-8'), hashlib.sha256).hexdigest()
@@ -172,6 +173,12 @@ def command_line_safe_secret(secret):
     return base64.encodebytes(secret).decode('utf-8').rstrip()
 
 def retrieve_nomcom_private_key(request, year):
+    """Retrieve decrypted nomcom private key from the session store
+
+    Retrieves encrypted, ascii-armored private key from the session store, encodes 
+    as utf8 bytes, then decrypts. Raises UnicodeError if the value in the session
+    store cannot be encoded as utf8.
+    """
     private_key = request.session.get('NOMCOM_PRIVATE_KEY_%s' % year, None)
 
     if not private_key:
@@ -183,7 +190,8 @@ def retrieve_nomcom_private_key(request, year):
             settings.OPENSSL_COMMAND,
             command_line_safe_secret(settings.NOMCOM_APP_SECRET)
         ),
-        private_key
+        # The openssl command expects ascii-armored input, so utf8 encoding should be valid
+        private_key.encode("utf8")
     )
     if code != 0:
         log("openssl error: %s:\n  Error %s: %s" %(command, code, error))        
@@ -191,6 +199,12 @@ def retrieve_nomcom_private_key(request, year):
 
 
 def store_nomcom_private_key(request, year, private_key):
+    """Put encrypted nomcom private key in the session store
+    
+    Encrypts the private key using openssl, then decodes the ascii-armored output
+    as utf8 and adds to the session store. Raises UnicodeError if the openssl's
+    output cannot be decoded as utf8.
+    """
     if not private_key:
         request.session['NOMCOM_PRIVATE_KEY_%s' % year] = ''
     else:
@@ -205,8 +219,9 @@ def store_nomcom_private_key(request, year, private_key):
         if code != 0:
             log("openssl error: %s:\n  Error %s: %s" %(command, code, error))        
         if error and error!=b"*** WARNING : deprecated key derivation used.\nUsing -iter or -pbkdf2 would be better.\n":
-            out = ''
-        request.session['NOMCOM_PRIVATE_KEY_%s' % year] = out
+            out = b''
+        # The openssl command output in 'out' is an ascii-armored value, so should be utf8-decodable
+        request.session['NOMCOM_PRIVATE_KEY_%s' % year] = out.decode("utf8")
 
 
 def validate_private_key(key):
@@ -428,7 +443,11 @@ def make_nomineeposition_for_newperson(nomcom, candidate_name, candidate_email, 
 def getheader(header_text, default="utf-8"):
     """Decode the specified header"""
 
-    tuples = decode_header(header_text)
+    try:
+        tuples = decode_header(header_text)
+    except TypeError:
+        return ""
+
     header_sections = [ text.decode(charset or default) if isinstance(text, bytes) else text for text, charset in tuples]
     return "".join(header_sections)
 
@@ -477,6 +496,9 @@ def parse_email(text):
     body = get_body(msg)
     subject = getheader(msg['Subject'])
     __, addr = parseaddr(msg['From'])
+    if not addr:
+        raise HeaderParseError
+
     return addr.lower(), subject, body
 
 
@@ -513,7 +535,7 @@ def list_eligible(nomcom=None, date=None, base_qs=None):
     elif eligibility_date.year in (2021,2022):
         return list_eligible_8989(date=eligibility_date, base_qs=base_qs)
     elif eligibility_date.year > 2022:
-        return list_eligible_8989bis(date=eligibility_date, base_qs=base_qs)
+        return list_eligible_9389(date=eligibility_date, base_qs=base_qs)
     else:
         return Person.objects.none()
 
@@ -531,7 +553,7 @@ def decorate_volunteers_with_qualifications(volunteers, nomcom=None, date=None, 
                 qualifications.append('path_2')
             if v.person in author_qs:
                 qualifications.append('path_3')
-            v.qualifications = ", ".join(qualifications)
+            v.qualifications = "+".join(qualifications)
     else:
         for v in volunteers:
             v.qualifications = ''
@@ -551,8 +573,8 @@ def list_eligible_8788(date, base_qs=None):
 def get_8989_eligibility_querysets(date, base_qs):
     return get_threerule_eligibility_querysets(date, base_qs, three_of_five_callable=three_of_five_eligible_8713)
 
-def get_8989bis_eligibility_querysets(date, base_qs):
-    return get_threerule_eligibility_querysets(date, base_qs, three_of_five_callable=three_of_five_eligible_8989bis)
+def get_9389_eligibility_querysets(date, base_qs):
+    return get_threerule_eligibility_querysets(date, base_qs, three_of_five_callable=three_of_five_eligible_9389)
 
 def get_threerule_eligibility_querysets(date, base_qs, three_of_five_callable):
     if not base_qs:
@@ -605,10 +627,10 @@ def list_eligible_8989(date, base_qs=None):
     author_pks = author_qs.values_list('pk',flat=True)
     return remove_disqualified(Person.objects.filter(pk__in=set(three_of_five_pks).union(set(officer_pks)).union(set(author_pks))))
 
-def list_eligible_8989bis(date, base_qs=None):
+def list_eligible_9389(date, base_qs=None):
     if not base_qs:
         base_qs = Person.objects.all()
-    three_of_five_qs, officer_qs, author_qs = get_8989bis_eligibility_querysets(date, base_qs)
+    three_of_five_qs, officer_qs, author_qs = get_9389_eligibility_querysets(date, base_qs)
     three_of_five_pks = three_of_five_qs.values_list('pk',flat=True)
     officer_pks = officer_qs.values_list('pk',flat=True)
     author_pks = author_qs.values_list('pk',flat=True)
@@ -653,21 +675,18 @@ def three_of_five_eligible_8713(previous_five, queryset=None):
         queryset = Person.objects.all()
     return queryset.filter(meetingregistration__meeting__in=list(previous_five),meetingregistration__attended=True).annotate(mtg_count=Count('meetingregistration')).filter(mtg_count__gte=3)
 
-def three_of_five_eligible_8989bis(previous_five, queryset=None):
+def three_of_five_eligible_9389(previous_five, queryset=None):
     """ Return a list of Person records who attended at least
         3 of the 5 type_id='ietf' meetings before the given
         date. Does not disqualify anyone based on held roles.
         This variant bases the calculation on Meeting.Session and MeetingRegistration.checked_in
-        Leadership will have to create a new RFC specifying eligibility (RFC8989 is timing out) before it can be used.
     """
     if queryset is None:
         queryset = Person.objects.all()
 
     counts = defaultdict(lambda: 0)
     for meeting in previous_five:
-        checked_in = meeting.meetingregistration_set.filter(reg_type='onsite', checkedin=True).values_list('person', flat=True)
-        sessions = meeting.session_set.filter(Q(type='plenary') | Q(group__type__in=['wg', 'rg']))
-        attended = Attended.objects.filter(session__in=sessions).values_list('person', flat=True)
+        checked_in, attended = participants_for_meeting(meeting)
         for id in set(checked_in) | set(attended):
             counts[id] += 1
     return queryset.filter(pk__in=[id for id, count in counts.items() if count >= 3])
@@ -697,3 +716,58 @@ def extract_volunteers(year):
     decorate_volunteers_with_qualifications(volunteers,nomcom=nomcom)
     volunteers = sorted(volunteers,key=lambda v:(not v.eligible,v.person.last_name()))
     return nomcom, volunteers
+
+
+def ingest_feedback_email(message: bytes, year: int):
+    from ietf.api.views import EmailIngestionError  # avoid circular import
+    from .models import NomCom
+    try:
+        nomcom = NomCom.objects.get(group__acronym__icontains=str(year),
+                                         group__state__slug='active')
+    except NomCom.DoesNotExist:
+        raise EmailIngestionError(
+            f"Error ingesting nomcom email: nomcom {year} does not exist or is not active",
+            email_body=dedent(f"""\
+                An email for nomcom {year} was posted to ingest_feedback_email, but no
+                active nomcom exists for that year.
+                """),
+        )
+
+    try:
+        feedback = create_feedback_email(nomcom, message)
+    except Exception as err:
+        raise EmailIngestionError(
+            f"Error ingesting nomcom {year} feedback email",
+            email_recipients=nomcom.chair_emails(),
+            email_body=dedent(f"""\
+                An error occurred while ingesting feedback email for nomcom {year}.
+                
+                {{error_summary}}
+                """),
+            email_original_message=message,
+        ) from err
+    log("Received nomcom email from %s" % feedback.author)
+
+
+def _is_time_to_send_reminder(nomcom, send_date, nomination_date):
+    if nomcom.reminder_interval:
+        days_passed = (send_date - nomination_date).days
+        return days_passed > 0 and days_passed % nomcom.reminder_interval == 0
+    else:
+        return bool(nomcom.reminderdates_set.filter(date=send_date))
+
+
+def send_reminders():
+    from .models import NomCom, NomineePosition
+    for nomcom in NomCom.objects.filter(group__state__slug="active"):
+        nps = NomineePosition.objects.filter(
+            nominee__nomcom=nomcom, nominee__duplicated__isnull=True
+        )
+        for nominee_position in nps.pending():
+            if _is_time_to_send_reminder(nomcom, date_today(), nominee_position.time.date()):
+                send_accept_reminder_to_nominee(nominee_position)
+                log(f"Sent accept reminder to {nominee_position.nominee.email.address}")
+        for nominee_position in nps.accepted().without_questionnaire_response():
+            if _is_time_to_send_reminder(nomcom, date_today(), nominee_position.time.date()):
+                send_questionnaire_reminder_to_nominee(nominee_position)
+                log(f"Sent questionnaire reminder to {nominee_position.nominee.email.address}")

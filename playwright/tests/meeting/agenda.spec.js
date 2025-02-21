@@ -138,6 +138,7 @@ test.describe('past - desktop', () => {
         .setLocale(BROWSER_LOCALE)
         .toFormat('DD \'at\' T ZZZZ')
       await expect(page.locator('.agenda h6').first()).toContainText(localDateTime)
+      await expect(page.locator('.agenda .agenda-table-display-session-head .agenda-table-cell-name').first()).toContainText('Monday Session I')
       // Switch to UTC
       await tzUtcBtnLocator.click()
       await expect(tzUtcBtnLocator).toHaveClass(/n-button--primary-type/)
@@ -148,10 +149,12 @@ test.describe('past - desktop', () => {
         .toFormat('DD \'at\' T ZZZZ')
       await expect(page.locator('.agenda h6').first()).toContainText(utcDateTime)
       await expect(page.locator('.agenda .agenda-timezone-ddn')).toContainText('UTC')
+      await expect(page.locator('.agenda .agenda-table-display-session-head .agenda-table-cell-name').first()).toContainText('Monday Session I')
       // Switch back to meeting timezone
       await tzMeetingBtnLocator.click()
       await expect(tzMeetingBtnLocator).toHaveClass(/n-button--primary-type/)
       await expect(page.locator('.agenda .agenda-timezone-ddn')).toContainText('Tokyo')
+      await expect(page.locator('.agenda .agenda-table-display-session-head .agenda-table-cell-name').first()).toContainText('Monday Session I')
     })
   })
 
@@ -213,7 +216,7 @@ test.describe('past - desktop', () => {
           const headerRow = page.locator(`#agenda-rowid-sesshd-${event.id}`)
           await expect(headerRow).toBeVisible()
           await expect(headerRow.locator('.agenda-table-cell-ts')).toContainText(eventTimeSlot)
-          await expect(headerRow.locator('.agenda-table-cell-name')).toContainText(`${DateTime.fromISO(event.startDateTime).toFormat('cccc')} ${event.name}`)
+          await expect(headerRow.locator('.agenda-table-cell-name')).toContainText(`${DateTime.fromISO(event.startDateTime).toFormat('cccc')} ${event.slotName}`)
         }
         // Timeslot
         await expect(row.locator('.agenda-table-cell-ts')).toContainText('—')
@@ -235,7 +238,7 @@ test.describe('past - desktop', () => {
       // Name column
       // -----------
       // Event icon
-      if (['break', 'plenary'].includes(event.type) || (event.type === 'other' && ['office hours', 'hackathon'].some(s => event.name.toLowerCase().indexOf(s) >= 0))) {
+      if (['break', 'plenary'].includes(event.type) || (event.type === 'other' && event.name.toLowerCase().indexOf('office hours') >= 0)) {
         await expect(row.locator('.agenda-table-cell-name > i.bi')).toBeVisible()
       }
       // Name link
@@ -268,7 +271,7 @@ test.describe('past - desktop', () => {
         }
         // Scheduled
         case 'sched': {
-          if (event.flags.showAgenda || ['regular', 'plenary'].includes(event.type)) {
+          if (event.flags.showAgenda || (['regular', 'plenary', 'other'].includes(event.type) && !['admin', 'closed_meeting', 'officehours', 'social'].includes(event.purpose))) {
             const eventButtons = row.locator('.agenda-table-cell-links > .agenda-table-cell-links-buttons')
             if (event.flags.agenda) {
               // Show meeting materials button
@@ -283,10 +286,17 @@ test.describe('past - desktop', () => {
               // No meeting materials yet warning badge
               await expect(eventButtons.locator('.no-meeting-materials')).toBeVisible()
             }
-            // Notepad button
-            const hedgeDocLink = `https://notes.ietf.org/notes-ietf-${meetingData.meeting.number}-${event.type === 'plenary' ? 'plenary' : event.acronym}`
-            await expect(eventButtons.locator(`#btn-lnk-${event.id}-note`)).toHaveAttribute('href', hedgeDocLink)
-            await expect(eventButtons.locator(`#btn-lnk-${event.id}-note > i.bi`)).toBeVisible()
+            if (event.groupAcronym === 'hackathon') {
+              // Hackathon Wiki button
+              const hackathonWikiLink = `https://wiki.ietf.org/meeting/${meetingData.meeting.number}/hackathon`
+              await expect(eventButtons.locator(`#btn-lnk-${event.id}-wiki`)).toHaveAttribute('href', hackathonWikiLink)
+              await expect(eventButtons.locator(`#btn-lnk-${event.id}-wiki > i.bi`)).toBeVisible()
+            } else {
+              // Notepad button
+              const hedgeDocLink = `https://notes.ietf.org/notes-ietf-${meetingData.meeting.number}-${event.type === 'plenary' ? 'plenary' : event.acronym}`
+              await expect(eventButtons.locator(`#btn-lnk-${event.id}-note`)).toHaveAttribute('href', hedgeDocLink)
+              await expect(eventButtons.locator(`#btn-lnk-${event.id}-note > i.bi`)).toBeVisible()
+            }
             // Chat logs
             await expect(eventButtons.locator(`#btn-lnk-${event.id}-logs`)).toHaveAttribute('href', event.links.chatArchive)
             await expect(eventButtons.locator(`#btn-lnk-${event.id}-logs > i.bi`)).toBeVisible()
@@ -925,7 +935,7 @@ test.describe('past - desktop', () => {
   test('agenda add to calendar', async ({ page }) => {
     await expect(page.locator('#agenda-quickaccess-addtocal-btn')).toContainText('Add to your calendar')
     await page.locator('#agenda-quickaccess-addtocal-btn').click()
-    const ddnLocator = page.locator('.n-dropdown-menu > .n-dropdown-option')
+    const ddnLocator = page.locator('.n-dropdown-menu > div > a.agenda-quickaccess-callinks')
     await expect(ddnLocator).toHaveCount(2)
     await expect(ddnLocator.first()).toContainText('Subscribe')
     await expect(ddnLocator.last()).toContainText('Download')
@@ -1145,7 +1155,7 @@ test.describe('future - desktop', () => {
       // -----------------------
       if (event.status === 'sched') {
         const eventButtons = row.locator('.agenda-table-cell-links > .agenda-table-cell-links-buttons')
-        if (event.flags.showAgenda || ['regular', 'plenary'].includes(event.type)) {
+        if (event.flags.showAgenda || (['regular', 'plenary', 'other'].includes(event.type) && !['admin', 'closed_meeting', 'officehours', 'social'].includes(event.purpose))) {
           if (event.flags.agenda) {
             // Show meeting materials button
             await expect(eventButtons.locator('i.bi.bi-collection')).toBeVisible()
@@ -1159,10 +1169,17 @@ test.describe('future - desktop', () => {
             // No meeting materials yet warning badge
             await expect(eventButtons.locator('.no-meeting-materials')).toBeVisible()
           }
-          // Notepad button
-          const hedgeDocLink = `https://notes.ietf.org/notes-ietf-${meetingData.meeting.number}-${event.type === 'plenary' ? 'plenary' : event.acronym}`
-          await expect(eventButtons.locator(`#btn-lnk-${event.id}-note`)).toHaveAttribute('href', hedgeDocLink)
-          await expect(eventButtons.locator(`#btn-lnk-${event.id}-note > i.bi`)).toBeVisible()
+          if (event.groupAcronym === 'hackathon') {
+            // Hackathon Wiki button
+            const hackathonWikiLink = `https://wiki.ietf.org/meeting/${meetingData.meeting.number}/hackathon`
+            await expect(eventButtons.locator(`#btn-lnk-${event.id}-wiki`)).toHaveAttribute('href', hackathonWikiLink)
+            await expect(eventButtons.locator(`#btn-lnk-${event.id}-wiki > i.bi`)).toBeVisible()
+          } else {
+            // Notepad button
+            const hedgeDocLink = `https://notes.ietf.org/notes-ietf-${meetingData.meeting.number}-${event.type === 'plenary' ? 'plenary' : event.acronym}`
+            await expect(eventButtons.locator(`#btn-lnk-${event.id}-note`)).toHaveAttribute('href', hedgeDocLink)
+            await expect(eventButtons.locator(`#btn-lnk-${event.id}-note > i.bi`)).toBeVisible()
+          }
           // Chat room
           await expect(eventButtons.locator(`#btn-lnk-${event.id}-room`)).toHaveAttribute('href', event.links.chat)
           await expect(eventButtons.locator(`#btn-lnk-${event.id}-room > i.bi`)).toBeVisible()
@@ -1424,27 +1441,34 @@ test.describe('past - small screens', () => {
 
         // has a bottom mobile bar
         await expect(page.locator('.agenda-mobile-bar')).toBeVisible()
-        await expect(barBtnLocator).toHaveCount(4)
-        await expect(barBtnLocator.first()).toContainText('Filters')
-        await expect(barBtnLocator.nth(1)).toContainText('Cal')
-        await expect(barBtnLocator.nth(2)).toContainText('.ics')
-        await expect(barBtnLocator.last().locator('> *')).toHaveCount(1)
-        await expect(barBtnLocator.last().locator('> *')).toHaveClass(/bi/)
+        await expect(barBtnLocator).toHaveCount(5)
+
+        // can open the jump to day dropdown
+        await barBtnLocator.first().click()
+        const jumpDayDdnLocator = page.locator('.n-dropdown-menu [data-testid=mobile-link]')
+        await expect(jumpDayDdnLocator).toHaveCount(7)
+        for (let idx = 0; idx < 7; idx++) {
+          const localDateTime = DateTime.fromISO(meetingData.meeting.startDate, { zone: meetingData.meeting.timezone })
+            .setLocale(BROWSER_LOCALE)
+            .plus({ days: idx })
+            .toFormat('ccc LLL d')
+          await expect(jumpDayDdnLocator.nth(idx)).toContainText(`Jump to ${localDateTime}`)
+        }
 
         // can open the filters overlay
-        await barBtnLocator.first().click()
+        await barBtnLocator.nth(1).click()
         await expect(page.locator('.agenda-personalize')).toBeVisible()
         await page.locator('.agenda-personalize .agenda-personalize-actions > button').nth(1).click()
         await expect(page.locator('.agenda-personalize')).toBeHidden()
 
         // can open the calendar view
-        await barBtnLocator.nth(1).click()
+        await barBtnLocator.nth(2).click()
         await expect(page.locator('.agenda-calendar')).toBeVisible()
         await page.locator('.agenda-calendar .agenda-calendar-actions > button').nth(1).click()
         await expect(page.locator('.agenda-calendar')).toBeHidden()
 
         // can open the ics dropdown
-        await barBtnLocator.nth(2).click()
+        await barBtnLocator.nth(3).click()
         const calDdnLocator = page.locator('.n-dropdown-menu > .n-dropdown-option')
         await expect(calDdnLocator).toHaveCount(2)
         await expect(calDdnLocator.first()).toContainText('Subscribe')

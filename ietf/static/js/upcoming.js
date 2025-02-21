@@ -3,6 +3,12 @@ var display_events = []; // filtered events, processed for calendar display
 var event_calendar; // handle on the calendar object
 var current_tz = 'UTC';
 
+const primary = getComputedStyle(document.body)
+    .getPropertyValue('--bs-primary');
+const secondary = getComputedStyle(document.body)
+    .getPropertyValue('--bs-secondary');
+
+
 // Test whether an event should be visible given a set of filter parameters
 function calendar_event_visible(filter_params, event) {
     // Visible if filtering is disabled or event has no keywords
@@ -28,7 +34,7 @@ function filter_calendar_events(filter_params, event_list) {
 }
 
 // format a moment in a tz
-var moment_formats = { time: 'HH:mm', date: 'YYYY-MM-DD', datetime: 'YYYY-MM-DD HH:mm' };
+var moment_formats = { time: 'HH:mm', date: 'YYYY-MM-DD', datetime: 'YYYY-MM-DD HH:mm' , timezone: 'z'};
 
 function format_moment(t_moment, tz, fmt_type) {
     return t_moment.tz(tz)
@@ -37,6 +43,9 @@ function format_moment(t_moment, tz, fmt_type) {
 
 function make_display_events(event_data, tz) {
     var calendarEl = document.getElementById('calendar');
+    if (!calendarEl) {
+        return;
+    }
     var glue = calendarEl.clientWidth > 720 ? ' ' : '\n';
     return $.map(event_data, function (src_event) {
         var title;
@@ -49,10 +58,14 @@ function make_display_events(event_data, tz) {
                 glue + (src_event.group || 'Invalid event'));
         }
         return {
-            title: title,
+            title: src_event.current_status != "canceled" ? title : `<del>${title}</del>`,
+            extendedProps: {
+                desc: src_event.current_status != "canceled" ? title : `CANCELLED: ${title}`
+            },
             start: format_moment(src_event.start_moment, tz, 'datetime'),
             end: format_moment(src_event.end_moment, tz, 'datetime'),
-            url: src_event.url
+            url: src_event.url,
+            backgroundColor: src_event.current_status != "canceled" ? primary: secondary
         }; // all events have the URL
     });
 }
@@ -73,14 +86,21 @@ function update_calendar(tz, filter_params) {
          * filtered events.
          */
         var calendarEl = document.getElementById('calendar');
+        if (!calendarEl) {
+            return;
+        }
         event_calendar = new FullCalendar(calendarEl, {
-            plugins: [dayGridPlugin],
+            plugins: [dayGridPlugin, bootstrap5Plugin],
             initialView: 'dayGridMonth',
+            themeSystem: 'bootstrap5',
             displayEventTime: false,
             events: function (fInfo, success) { success(display_events); },
+            eventContent: function(info) {
+                return {html: info.event.title};
+            },
             eventDidMount: function (info) {
                 $(info.el)
-                    .tooltip({ title: info.event.title });
+                    .tooltip({ title: info.event.extendedProps.desc });
             },
             eventDisplay: 'block'
         });
@@ -122,7 +142,7 @@ function format_session_time(session_elt, tz) {
         .attr('data-start-utc'));
     var end = moment.utc($(session_elt)
         .attr('data-end-utc'));
-    return format_moment(start, tz, 'datetime') + '-' + format_moment(end, tz, 'time');
+    return format_moment(start, tz, 'datetime') + '-' + format_moment(end, tz, 'time') + ' ' + format_moment(start, tz, 'timezone');
 }
 
 function format_meeting_time(meeting_elt, tz) {

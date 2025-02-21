@@ -32,7 +32,7 @@
             regarding an IETF document or contribution when the person letting the
             IETF know about the patent has no relationship with the patent owners.
             Click
-            <a href="{% url 'ietf.ipr.views.new' type='specific' %}">here</a>
+            <a href="{% url 'ietf.ipr.views.new' 'specific' %}">here</a>
             if you want to disclose information about patents or patent
             applications where you do have a relationship to the patent owners or
             patent applicants.
@@ -121,47 +121,22 @@
         {% endif %}
         {% if type != "generic" %}
             <h2 class="mt-4">{% cycle section %}. IETF document or other contribution to which this IPR disclosure relates</h2>
-            <p class="form-text">
+            <p>
                 If an Internet-Draft or RFC includes multiple parts and it is not
                 reasonably apparent which part of such Internet-Draft or RFC is alleged
-                to be covered by the patent information disclosed in Section
-                V(A) or V(B), please identify the sections of
-                the Internet-Draft or RFC that are alleged to be so
+                to be covered by the patent information disclosed in Section V,
+                please identify the sections of the Internet-Draft or RFC that are alleged to be so
                 covered.
             </p>
             {{ draft_formset.management_form }}
             {% for draft_form in draft_formset %}
-                <div class="row draft-row {% if forloop.last %}template d-none{% endif %}">
-                    <label class="col-md-2 fw-bold" for="{{ draft_form.document.id_for_label }}">{{ draft_form.document.label }}</label>
-                    <div class="col-md-6">
-                        {{ draft_form.id }}
-                        {{ draft_form.document }}
-                        {% if draft_form.document.errors %}<div class="alert alert-danger my-3">{{ draft_form.document.errors }}</div>{% endif %}
-                    </div>
-                    <div class="col-md-2">
-                        {% bootstrap_field draft_form.revisions class="form-control" placeholder="Revisions, e.g., 04-07" show_help=False show_label=False %}
-                        <label class="d-none" for="{{ draft_form.revisions.id_for_label }}">{{ draft_form.revisions.label }}</label>
-                    </div>
-                    <div class="col-md-2">
-                        {% bootstrap_field draft_form.sections class="form-control" placeholder="Sections" show_help=False show_label=False %}
-                        <label class="d-none" for="{{ draft_form.sections.id_for_label }}">{{ draft_form.sections.label }}</label>
-                    </div>
+                <div class="row draft-row">
+                    {% include "ipr/details_edit_draft.html" with draft_form=draft_form only %}
                 </div>
             {% endfor %}
-            {% comment %}
-            {% for draft_form in draft_formset %}
-                <div class="row draft-row {% if forloop.last %}template{% endif %}">
-                    <div class="col-md-2 fw-bold">{% bootstrap_label draft_form.document.label %}</div>
-                    <div class="col-md-6">{% bootstrap_field draft_form.document label_class="d-none" show_help=False %}</div>
-                    <div class="col-md-2">
-                        {% bootstrap_field draft_form.revisions placeholder="Revisions, e.g., 04-07" label_class="d-none" show_help=False %}
-                    </div>
-                    <div class="col-md-2">
-                        {% bootstrap_field draft_form.sections placeholder="Sections" label_class="d-none" show_help=False %}
-                    </div>
-                </div>
-            {% endfor %}
-            {% endcomment %}
+            <div class="row draft-row template d-none">
+                {% include "ipr/details_edit_draft.html" with draft_form=draft_formset.empty_form only %}
+            </div>
             <div class="mb-3 row">
                 <div class="col-md-2"></div>
                 <div class="col-md-10">
@@ -178,6 +153,13 @@
             <small>i.e., patents or patent applications required to be disclosed by Section 5 of RFC8179</small>
         </h2>
         {% if form.patent_number %}
+            {% if form.is_blanket_disclosure %}
+                <p>
+                    This IPR disclosure must either identify a specific patent or patents in sections V(A) and V(B)
+                    below, or be made as a blanket IPR disclosure. 
+                </p>
+                {% bootstrap_field form.is_blanket_disclosure layout='horizontal' %}
+            {% endif %}
             <p>
                 A. For granted patents or published pending patent applications,
                 please provide the following information:

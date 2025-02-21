@@ -1,4 +1,4 @@
-# Copyright The IETF Trust 2007-2022, All Rights Reserved
+# Copyright The IETF Trust 2007-2024, All Rights Reserved
 # -*- coding: utf-8 -*-
 
 
@@ -10,20 +10,22 @@ import os
 import sys
 import datetime
 import warnings
+from hashlib import sha384
 from typing import Any, Dict, List, Tuple # pyflakes:ignore
 
 warnings.simplefilter("always", DeprecationWarning)
-warnings.filterwarnings("ignore", message="'urllib3\[secure\]' extra is deprecated")
-warnings.filterwarnings("ignore", message="The logout\(\) view is superseded by")
+warnings.filterwarnings("ignore", message="pkg_resources is deprecated as an API")
+warnings.filterwarnings("ignore", "Log out via GET requests is deprecated")  # happens in oidc_provider
+warnings.filterwarnings("ignore", module="tastypie", message="The django.utils.datetime_safe module is deprecated.")
+warnings.filterwarnings("ignore", module="oidc_provider", message="The django.utils.timezone.utc alias is deprecated.")
+warnings.filterwarnings("ignore", message="The USE_DEPRECATED_PYTZ setting,")  # https://github.com/ietf-tools/datatracker/issues/5635
+warnings.filterwarnings("ignore", message="The USE_L10N setting is deprecated.")  # https://github.com/ietf-tools/datatracker/issues/5648
+warnings.filterwarnings("ignore", message="django.contrib.auth.hashers.CryptPasswordHasher is deprecated.")  # https://github.com/ietf-tools/datatracker/issues/5663
+warnings.filterwarnings("ignore", message="'urllib3\\[secure\\]' extra is deprecated")
+warnings.filterwarnings("ignore", message="The logout\\(\\) view is superseded by")
 warnings.filterwarnings("ignore", message="Report.file_reporters will no longer be available in Coverage.py 4.2", module="coverage.report")
-warnings.filterwarnings("ignore", message="{% load staticfiles %} is deprecated")
 warnings.filterwarnings("ignore", message="Using or importing the ABCs from 'collections' instead of from 'collections.abc' is deprecated", module="bleach")
-warnings.filterwarnings("ignore", message="HTTPResponse.getheader\(\) is deprecated", module='selenium.webdriver')
-try:
-    import syslog
-    syslog.openlog(str("datatracker"), syslog.LOG_PID, syslog.LOG_USER)
-except ImportError:
-    pass
+warnings.filterwarnings("ignore", message="HTTPResponse.getheader\\(\\) is deprecated", module='selenium.webdriver')
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.abspath(BASE_DIR + "/.."))
@@ -44,17 +46,12 @@ SERVER_MODE = 'development'
 # Domain name of the IETF
 IETF_DOMAIN = 'ietf.org'
 
+# Overriden in settings_local
 ADMINS = [
-#    ('Henrik Levkowetz', 'henrik@levkowetz.com'),
-    ('Robert Sparks', 'rjsparks@nostrum.com'),
-#    ('Ole Laursen', 'olau@iola.dk'),
-    ('Ryan Cross', 'rcross@amsl.com'),
-    ('Glen Barney', 'glen@amsl.com'),
-    ('Maddy Conner', 'maddy@amsl.com'),
-    ('Kesara Rathnayaka', 'krathnayake@ietf.org'),
+    ('Tools Help', 'tools-help@ietf.org'),
 ]                                       # type: List[Tuple[str, str]]
 
-BUG_REPORT_EMAIL = "datatracker-project@ietf.org"
+BUG_REPORT_EMAIL = "tools-help@ietf.org"
 
 PASSWORD_HASHERS = [
     'django.contrib.auth.hashers.Argon2PasswordHasher',
@@ -80,21 +77,13 @@ MANAGERS = ADMINS
 
 DATABASES = {
     'default': {
-        'NAME': 'ietf_utf8',
-        'ENGINE': 'django.db.backends.mysql',
+        'NAME': 'datatracker',
+        'ENGINE': 'django.db.backends.postgresql_psycopg2',
         'USER': 'ietf',
-        #'PASSWORD': 'ietf',
-        'OPTIONS': {
-            'sql_mode': 'STRICT_TRANS_TABLES',
-            'init_command': 'SET storage_engine=MyISAM; SET names "utf8"'
-        },
+        #'PASSWORD': 'somepassword',
     },
 }
 
-DATABASE_TEST_OPTIONS = {
-    # Comment this out if your database doesn't support InnoDB
-    'init_command': 'SET storage_engine=InnoDB',
-}
 
 # Local time zone for this installation. Choices can be found here:
 # http://www.postgresql.org/docs/8.1/static/datetime-keywords.html#DATETIME-TIMEZONE-SET-TABLE
@@ -114,7 +103,27 @@ SITE_ID = 1
 # to load the internationalization machinery.
 USE_I18N = False
 
+# Django 4.0 changed the default setting of USE_L10N to True. The setting
+# is deprecated and will be removed in Django 5.0.
+USE_L10N = False
+
 USE_TZ = True
+USE_DEPRECATED_PYTZ = True  # supported until Django 5
+
+# The DjangoDivFormRenderer is a transitional class that opts in to defaulting to the div.html
+# template for formsets. This will become the default behavior in Django 5.0. This configuration
+# can be removed at that point.
+# See https://docs.djangoproject.com/en/4.2/releases/4.1/#forms
+FORM_RENDERER = "django.forms.renderers.DjangoDivFormRenderer"
+
+# Default primary key field type to use for models that don’t have a field with primary_key=True.
+# In the future (relative to 4.2), the default will become 'django.db.models.BigAutoField.'
+DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'
+
+# OIDC configuration
+_SITE_URL = os.environ.get("OIDC_SITE_URL", None)
+if _SITE_URL is not None:
+    SITE_URL = _SITE_URL
 
 if SERVER_MODE == 'production':
     MEDIA_ROOT = '/a/www/www6s/lib/dt/media/'
@@ -150,7 +159,6 @@ IETF_NOTES_URL = 'https://notes.ietf.org/'  # HedgeDoc base URL
 # Absolute path to the directory static files should be collected to.
 # Example: "/var/www/example.com/static/"
 
-
 SERVE_CDN_PHOTOS = True
 
 SERVE_CDN_FILES_LOCALLY_IN_DEV_MODE = True
@@ -160,7 +168,7 @@ if SERVER_MODE != 'production' and SERVE_CDN_FILES_LOCALLY_IN_DEV_MODE:
     STATIC_URL = "/static/"
     STATIC_ROOT = os.path.abspath(BASE_DIR + "/../static/")
 else:
-    STATIC_URL = "https://www.ietf.org/lib/dt/%s/"%__version__
+    STATIC_URL = "https://static.ietf.org/dt/%s/"%__version__
     STATIC_ROOT = "/a/www/www6s/lib/dt/%s/"%__version__
 
 # List of finder classes that know how to find static files in
@@ -170,9 +178,20 @@ STATICFILES_FINDERS = (
     'django.contrib.staticfiles.finders.AppDirectoriesFinder',
 )
 
+# Client-side static.ietf.org URL
+STATIC_IETF_ORG = "https://static.ietf.org"
+# Server-side static.ietf.org URL (used in pdfized)
+STATIC_IETF_ORG_INTERNAL = STATIC_IETF_ORG
+
+ENABLE_BLOBSTORAGE = True
+
+BLOBSTORAGE_MAX_ATTEMPTS = 1
+BLOBSTORAGE_CONNECT_TIMEOUT = 2
+BLOBSTORAGE_READ_TIMEOUT = 2
+
 WSGI_APPLICATION = "ietf.wsgi.application"
 
-AUTHENTICATION_BACKENDS = ( 'django.contrib.auth.backends.ModelBackend', )
+AUTHENTICATION_BACKENDS = ( 'ietf.ietfauth.backends.CaseInsensitiveModelBackend', )
 
 FILE_UPLOAD_PERMISSIONS = 0o644          
 
@@ -222,11 +241,11 @@ LOGGING = {
     #
     'loggers': {
         'django': {
-            'handlers': ['debug_console', 'mail_admins'],
+            'handlers': ['console', 'mail_admins'],
             'level': 'INFO',
         },
         'django.request': {
-            'handlers': ['debug_console'],
+            'handlers': ['console'],
             'level': 'ERROR',
         },
         'django.server': {
@@ -234,13 +253,21 @@ LOGGING = {
             'level': 'INFO',
         },
         'django.security': {
-	    'handlers': ['debug_console', ],
+            'handlers': ['console', ],
             'level': 'INFO',
         },
- 	'oidc_provider': {
-	    'handlers': ['debug_console', ],
-	    'level': 'DEBUG',
-	},
+        'oidc_provider': {
+            'handlers': ['console', ],
+            'level': 'DEBUG',
+        },
+        'datatracker': {
+            'handlers': ['console'],
+            'level': 'INFO',
+        },
+        'celery': {
+            'handlers': ['console'],
+            'level': 'INFO',
+        },
     },
     #
     # No logger filters
@@ -250,13 +277,6 @@ LOGGING = {
             'level': 'DEBUG',
             'class': 'logging.StreamHandler',
             'formatter': 'plain',
-        },
-        'syslog': {
-            'level': 'DEBUG',
-            'class': 'logging.handlers.SysLogHandler',
-            'facility': 'user',
-            'formatter': 'plain',
-            'address': '/dev/log',
         },
         'debug_console': {
             # Active only when DEBUG=True
@@ -311,16 +331,12 @@ LOGGING = {
             'style': '{',
             'format': '{levelname}: {name}:{lineno}: {message}',
         },
+        'json' : {
+            "class": "ietf.utils.jsonlogger.DatatrackerJsonFormatter",
+            "style": "{",
+            "format": "{asctime}{levelname}{message}{name}{pathname}{lineno}{funcName}{process}",
+        }
     },
-}
-
-# This should be overridden by settings_local for any logger where debug (or
-# other) custom log settings are wanted.  Use "ietf/manage.py showloggers -l"
-# to show registered loggers.  The content here should match the levels above
-# and is shown as an example:
-UTILS_LOGGER_LEVELS: Dict[str, str] = {
-#    'django':           'INFO',
-#    'django.server':    'INFO',
 }
 
 # End logging
@@ -328,7 +344,12 @@ UTILS_LOGGER_LEVELS: Dict[str, str] = {
 
 
 X_FRAME_OPTIONS = 'SAMEORIGIN'
-CSRF_TRUSTED_ORIGINS = ['ietf.org', '*.ietf.org', 'meetecho.com', '*.meetecho.com', 'gather.town', '*.gather.town', ]
+CSRF_TRUSTED_ORIGINS = [
+    "https://ietf.org",
+    "https://*.ietf.org",
+    'https://meetecho.com',
+    'https://*.meetecho.com',
+]
 CSRF_COOKIE_SAMESITE = 'None'
 CSRF_COOKIE_SECURE = True
 
@@ -338,11 +359,7 @@ SESSION_COOKIE_SAMESITE = 'None'
 SESSION_COOKIE_SECURE = True
 
 SESSION_EXPIRE_AT_BROWSER_CLOSE = False
-# We want to use the JSON serialisation, as it's safer -- but there is /secr/
-# code which stashes objects in the session that can't be JSON serialized.
-# Switch when that code is rewritten.
-#SESSION_SERIALIZER = "django.contrib.sessions.serializers.JSONSerializer"
-SESSION_SERIALIZER = 'django.contrib.sessions.serializers.PickleSerializer'
+SESSION_SERIALIZER = "django.contrib.sessions.serializers.JSONSerializer"
 SESSION_ENGINE = "django.contrib.sessions.backends.cache"
 SESSION_SAVE_EVERY_REQUEST = True
 SESSION_CACHE_ALIAS = 'sessions'
@@ -372,6 +389,7 @@ TEMPLATES = [
                 'ietf.context_processors.settings_info',
                 'ietf.secr.context_processors.secr_revision_info',
                 'ietf.context_processors.rfcdiff_base_url',
+                'ietf.context_processors.timezone_now',
             ],
             'loaders': [
                 ('django.template.loaders.cached.Loader', (
@@ -389,24 +407,25 @@ if DEBUG:
 
 
 MIDDLEWARE = [
-    'django.middleware.csrf.CsrfViewMiddleware',
-    'corsheaders.middleware.CorsMiddleware', # see docs on CORS_REPLACE_HTTPS_REFERER before using it
-    'django.middleware.common.CommonMiddleware',
-    'django.contrib.sessions.middleware.SessionMiddleware',
-    'django.contrib.auth.middleware.AuthenticationMiddleware',
-    'django.contrib.messages.middleware.MessageMiddleware',
-    'django.middleware.http.ConditionalGetMiddleware',
-    'simple_history.middleware.HistoryRequestMiddleware',
+    "django.middleware.csrf.CsrfViewMiddleware",
+    "corsheaders.middleware.CorsMiddleware", # see docs on CORS_REPLACE_HTTPS_REFERER before using it
+    "django.middleware.common.CommonMiddleware",
+    "django.contrib.sessions.middleware.SessionMiddleware",
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "django.contrib.messages.middleware.MessageMiddleware",
+    "django.middleware.http.ConditionalGetMiddleware",
+    "simple_history.middleware.HistoryRequestMiddleware",
     # comment in this to get logging of SQL insert and update statements:
-    #'ietf.middleware.sql_log_middleware',
-    'ietf.middleware.SMTPExceptionMiddleware',
-    'ietf.middleware.Utf8ExceptionMiddleware',
-    'ietf.middleware.redirect_trailing_period_middleware',
-    'django_referrer_policy.middleware.ReferrerPolicyMiddleware',
-    'django.middleware.clickjacking.XFrameOptionsMiddleware',
-    'django.middleware.security.SecurityMiddleware',
- #   'csp.middleware.CSPMiddleware',
-    'ietf.middleware.unicode_nfkc_normalization_middleware',
+    #"ietf.middleware.sql_log_middleware",
+    "ietf.middleware.SMTPExceptionMiddleware",
+    "ietf.middleware.Utf8ExceptionMiddleware",
+    "ietf.middleware.redirect_trailing_period_middleware",
+    "django_referrer_policy.middleware.ReferrerPolicyMiddleware",
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "django.middleware.security.SecurityMiddleware",
+    #"csp.middleware.CSPMiddleware",
+    "ietf.middleware.unicode_nfkc_normalization_middleware",
+    "ietf.middleware.is_authenticated_header_middleware",
 ]
 
 ROOT_URLCONF = 'ietf.urls'
@@ -424,7 +443,7 @@ STATICFILES_DIRS = (
 
 INSTALLED_APPS = [
     # Django apps
-    'django.contrib.admin',
+    'ietf.admin',  # replaces django.contrib.admin
     'django.contrib.admindocs',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -439,11 +458,13 @@ INSTALLED_APPS = [
     'django_vite',
     'django_bootstrap5',
     'django_celery_beat',
+    'django_celery_results',
     'corsheaders',
     'django_markup',
-    'django_password_strength',
-    'form_utils',
     'oidc_provider',
+    'drf_spectacular',
+    'drf_standardized_errors',
+    'rest_framework',
     'simple_history',
     'tastypie',
     'widget_tweaks',
@@ -469,16 +490,13 @@ INSTALLED_APPS = [
     'ietf.release',
     'ietf.review',
     'ietf.stats',
+    'ietf.status',
     'ietf.submit',
     'ietf.sync',
     'ietf.utils',
     # IETF Secretariat apps
     'ietf.secr.announcement',
-    'ietf.secr.areas',
-    'ietf.secr.groups',
     'ietf.secr.meetings',
-    'ietf.secr.proceedings',
-    'ietf.secr.roles',
     'ietf.secr.rolodex',
     'ietf.secr.sreq',
     'ietf.secr.telechat',
@@ -532,6 +550,8 @@ SECURE_HSTS_SECONDS             = 3600
 #SECURE_REDIRECT_EXEMPT
 #SECURE_SSL_HOST 
 #SECURE_SSL_REDIRECT             = True
+# Relax the COOP policy to allow Meetecho authentication pop-up
+SECURE_CROSS_ORIGIN_OPENER_POLICY = "unsafe-none"
 
 # Override this in your settings_local with the IP addresses relevant for you:
 INTERNAL_IPS = (
@@ -540,6 +560,76 @@ INTERNAL_IPS = (
         '::1',
 )
 
+# django-rest-framework configuration
+REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "ietf.api.authentication.ApiKeyAuthentication",
+        "rest_framework.authentication.SessionAuthentication",
+    ],
+    "DEFAULT_PERMISSION_CLASSES": [
+        "ietf.api.permissions.HasApiKey",
+    ],
+    "DEFAULT_RENDERER_CLASSES": [
+        "rest_framework.renderers.JSONRenderer",
+    ],
+    "DEFAULT_PARSER_CLASSES": [
+        "rest_framework.parsers.JSONParser",
+    ],
+    "DEFAULT_SCHEMA_CLASS": "drf_standardized_errors.openapi.AutoSchema",
+    "EXCEPTION_HANDLER": "drf_standardized_errors.handler.exception_handler",
+}
+
+# DRF OpenApi schema settings
+SPECTACULAR_SETTINGS = {
+    "TITLE": "Datatracker API",
+    "DESCRIPTION": "Datatracker API",
+    "VERSION": "1.0.0",
+    "SCHEMA_PATH_PREFIX": "/api/",
+    "COMPONENT_SPLIT_REQUEST": True,
+    "COMPONENT_NO_READ_ONLY_REQUIRED": True,
+    "SERVERS": [
+        {"url": "http://localhost:8000", "description": "local dev server"},
+        {"url": "https://datatracker.ietf.org", "description": "production server"},
+    ],
+    # The following settings are needed for drf-standardized-errors
+    "ENUM_NAME_OVERRIDES": {
+        "ValidationErrorEnum": "drf_standardized_errors.openapi_serializers.ValidationErrorEnum.choices",
+        "ClientErrorEnum": "drf_standardized_errors.openapi_serializers.ClientErrorEnum.choices",
+        "ServerErrorEnum": "drf_standardized_errors.openapi_serializers.ServerErrorEnum.choices",
+        "ErrorCode401Enum": "drf_standardized_errors.openapi_serializers.ErrorCode401Enum.choices",
+        "ErrorCode403Enum": "drf_standardized_errors.openapi_serializers.ErrorCode403Enum.choices",
+        "ErrorCode404Enum": "drf_standardized_errors.openapi_serializers.ErrorCode404Enum.choices",
+        "ErrorCode405Enum": "drf_standardized_errors.openapi_serializers.ErrorCode405Enum.choices",
+        "ErrorCode406Enum": "drf_standardized_errors.openapi_serializers.ErrorCode406Enum.choices",
+        "ErrorCode415Enum": "drf_standardized_errors.openapi_serializers.ErrorCode415Enum.choices",
+        "ErrorCode429Enum": "drf_standardized_errors.openapi_serializers.ErrorCode429Enum.choices",
+        "ErrorCode500Enum": "drf_standardized_errors.openapi_serializers.ErrorCode500Enum.choices",
+    },
+    "POSTPROCESSING_HOOKS": ["drf_standardized_errors.openapi_hooks.postprocess_schema_enums"],
+}
+
+# DRF Standardized Errors settings
+DRF_STANDARDIZED_ERRORS = {
+    # enable the standardized errors when DEBUG=True for unhandled exceptions.
+    # By default, this is set to False so you're able to view the traceback in
+    # the terminal and get more information about the exception.
+    "ENABLE_IN_DEBUG_FOR_UNHANDLED_EXCEPTIONS": False,
+    # ONLY the responses that correspond to these status codes will appear
+    # in the API schema.
+    "ALLOWED_ERROR_STATUS_CODES": [
+        "400",
+        # "401",
+        # "403",
+        "404",
+        # "405",
+        # "406",
+        # "415",
+        # "429",
+        # "500",
+    ],
+
+}
+
 # no slash at end
 IDTRACKER_BASE_URL = "https://datatracker.ietf.org"
 RFCDIFF_BASE_URL = "https://author-tools.ietf.org/iddiff"
@@ -547,7 +637,9 @@ IDNITS_BASE_URL = "https://author-tools.ietf.org/api/idnits"
 IDNITS_SERVICE_URL = "https://author-tools.ietf.org/idnits"
 
 # Content security policy configuration (django-csp)
-CSP_DEFAULT_SRC = ("'self'", "'unsafe-inline'", f"data: {IDTRACKER_BASE_URL} https://www.ietf.org/ https://analytics.ietf.org/ https://fonts.googleapis.com/")
+# (In current production, the Content-Security-Policy header is completely set by nginx configuration, but
+#  we try to keep this in sync to avoid confusion)
+CSP_DEFAULT_SRC = ("'self'", "'unsafe-inline'", f"data: {IDTRACKER_BASE_URL} http://ietf.org/ https://www.ietf.org/ https://analytics.ietf.org/ https://static.ietf.org")
 
 # The name of the method to use to invoke the test suite
 TEST_RUNNER = 'ietf.utils.test_runner.IetfTestRunner'
@@ -557,8 +649,6 @@ GLOBAL_TEST_FIXTURES = [ 'names','ietf.utils.test_data.make_immutable_base_data'
     'nomcom_templates','proceedings_templates' ]
 
 TEST_DIFF_FAILURE_DIR = "/tmp/test/failure/"
-
-TEST_GHOSTDRIVER_LOG_PATH = "ghostdriver.log"
 
 # These are regexes
 TEST_URL_COVERAGE_EXCLUDE = [
@@ -586,9 +676,9 @@ TEST_CODE_COVERAGE_EXCLUDE_FILES = [
     "ietf/utils/test_runner.py",
     "ietf/name/generate_fixtures.py",
     "ietf/review/import_from_review_tool.py",
-    "ietf/stats/backfill_data.py",
     "ietf/utils/patch.py",
     "ietf/utils/test_data.py",
+    "ietf/utils/jstest.py",
 ]
 
 # These are code line regex patterns
@@ -643,6 +733,7 @@ URL_REGEXPS = {
     "acronym": r"(?P<acronym>[-a-z0-9]+)",
     "bofreq": r"(?P<name>bofreq-[-a-z0-9]+)",
     "charter": r"(?P<name>charter-[-a-z0-9]+)",
+    "statement": r"(?P<name>statement-[-a-z0-9]+)",
     "date": r"(?P<date>\d{4}-\d{2}-\d{2})",
     "name": r"(?P<name>[A-Za-z0-9._+-]+?)",
     "document": r"(?P<document>[a-z][-a-z0-9]+)", # regular document names
@@ -651,39 +742,70 @@ URL_REGEXPS = {
     "schedule_name": r"(?P<name>[A-Za-z0-9-:_]+)",
 }
 
+STORAGES: dict[str, Any] = {
+    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+}
+
+# settings_local will need to configure storages for these names
+MORE_STORAGE_NAMES: list[str] = [
+    "bofreq",
+    "charter",
+    "conflrev",
+    "active-draft",
+    "draft",
+    "slides",
+    "minutes",
+    "agenda",
+    "bluesheets",
+    "procmaterials",
+    "narrativeminutes",
+    "statement",
+    "statchg",
+    "liai-att",
+    "chatlog",
+    "polls",
+    "staging",
+    "bibxml-ids",
+    "indexes",
+    "floorplan",
+    "meetinghostlogo",
+    "photo",
+    "review",
+]
+
 # Override this in settings_local.py if needed
 # *_PATH variables ends with a slash/ .
 
-#DOCUMENT_PATH_PATTERN = '/a/www/ietf-ftp/{doc.type_id}/'
 DOCUMENT_PATH_PATTERN = '/a/ietfdata/doc/{doc.type_id}/'
 INTERNET_DRAFT_PATH = '/a/ietfdata/doc/draft/repository'
 INTERNET_DRAFT_PDF_PATH = '/a/www/ietf-datatracker/pdf/'
 RFC_PATH = '/a/www/ietf-ftp/rfc/'
 CHARTER_PATH = '/a/ietfdata/doc/charter/'
+CHARTER_COPY_PATH = '/a/www/ietf-ftp/ietf'  # copy 1wg-charters files here if set
+CHARTER_COPY_OTHER_PATH = '/a/ftp/ietf'
+CHARTER_COPY_THIRD_PATH = '/a/ftp/charter'
+GROUP_SUMMARY_PATH = '/a/www/ietf-ftp/ietf'
 BOFREQ_PATH = '/a/ietfdata/doc/bofreq/'
 CONFLICT_REVIEW_PATH = '/a/ietfdata/doc/conflict-review'
 STATUS_CHANGE_PATH = '/a/ietfdata/doc/status-change'
 AGENDA_PATH = '/a/www/www6s/proceedings/'
 MEETINGHOST_LOGO_PATH = AGENDA_PATH  # put these in the same place as other proceedings files
-IPR_DOCUMENT_PATH = '/a/www/ietf-ftp/ietf/IPR/'
-IESG_TASK_FILE = '/a/www/www6/iesg/internal/task.txt'
-IESG_ROLL_CALL_FILE = '/a/www/www6/iesg/internal/rollcall.txt'
-IESG_ROLL_CALL_URL = 'https://www6.ietf.org/iesg/internal/rollcall.txt'
-IESG_MINUTES_FILE = '/a/www/www6/iesg/internal/minutes.txt'
-IESG_MINUTES_URL = 'https://www6.ietf.org/iesg/internal/minutes.txt'
-IESG_WG_EVALUATION_DIR = "/a/www/www6/iesg/evaluation"
 # Move drafts to this directory when they expire
 INTERNET_DRAFT_ARCHIVE_DIR = '/a/ietfdata/doc/draft/collection/draft-archive/'
-# The following directory contains linked copies of all drafts, but don't
-# write anything to this directory -- its content is maintained by ghostlinkd:
+# The following directory contains copies of all drafts - it used to be
+# a set of hardlinks maintained by ghostlinkd, but is now explicitly written to
 INTERNET_ALL_DRAFTS_ARCHIVE_DIR = '/a/ietfdata/doc/draft/archive'
 MEETING_RECORDINGS_DIR = '/a/www/audio'
 DERIVED_DIR = '/a/ietfdata/derived'
+FTP_DIR = '/a/ftp'
+ALL_ID_DOWNLOAD_DIR = '/a/www/www6s/download'
+NFS_METRICS_TMP_DIR = '/a/tmp'
 
 DOCUMENT_FORMAT_ALLOWLIST = ["txt", "ps", "pdf", "xml", "html", ]
 
 # Mailing list info URL for lists hosted on the IETF servers
-MAILING_LIST_INFO_URL = "https://www.ietf.org/mailman/listinfo/%(list_addr)s"
+MAILING_LIST_INFO_URL = "https://mailman3.%(domain)s/mailman3/lists/%(list_addr)s.%(domain)s"
 MAILING_LIST_ARCHIVE_URL = "https://mailarchive.ietf.org"
 
 # Liaison Statement Tool settings (one is used in DOC_HREFS below)
@@ -696,7 +818,7 @@ LIAISON_ATTACH_URL = 'https://www.ietf.org/lib/dt/documents/LIAISON/' # should e
 DOC_HREFS = {
     "charter":  "https://www.ietf.org/charter/{doc.name}-{doc.rev}.txt",
     "draft":    "https://www.ietf.org/archive/id/{doc.name}-{doc.rev}.txt",
-    "rfc":      "https://www.rfc-editor.org/rfc/rfc{doc.rfcnum}.txt",
+    "rfc":      "https://www.rfc-editor.org/rfc/rfc{doc.rfc_number}.txt",
     "slides": "https://www.ietf.org/slides/{doc.name}-{doc.rev}",
     "procmaterials": "https://www.ietf.org/procmaterials/{doc.name}-{doc.rev}",
     "conflrev": "https://www.ietf.org/cr/{doc.name}-{doc.rev}.txt",
@@ -716,44 +838,6 @@ DOC_ACTION_HOLDER_AGE_LIMIT_DAYS = 20
 CACHE_MIDDLEWARE_SECONDS = 300
 CACHE_MIDDLEWARE_KEY_PREFIX = ''
 
-# The default with no CACHES setting is 'django.core.cache.backends.locmem.LocMemCache'
-# This setting is possibly overridden further down, after the import of settings_local
-CACHES = {
-    'default': {
-        'BACKEND': 'django.core.cache.backends.memcached.MemcachedCache',
-        'LOCATION': '127.0.0.1:11211',
-        'VERSION': __version__,
-        'KEY_PREFIX': 'ietf:dt',
-    },
-    'sessions': {
-        'BACKEND': 'django.core.cache.backends.memcached.MemcachedCache',
-        'LOCATION': '127.0.0.1:11211',
-        # No release-specific VERSION setting.
-        'KEY_PREFIX': 'ietf:dt',
-    },
-    'htmlized': {
-        'BACKEND': 'django.core.cache.backends.filebased.FileBasedCache',
-        'LOCATION': '/a/cache/datatracker/htmlized',
-        'OPTIONS': {
-            'MAX_ENTRIES': 100000,      # 100,000
-        },
-    },
-    'pdfized': {
-        'BACKEND': 'django.core.cache.backends.filebased.FileBasedCache',
-        'LOCATION': '/a/cache/datatracker/pdfized',
-        'OPTIONS': {
-            'MAX_ENTRIES': 100000,      # 100,000
-        },
-    },
-    'slowpages': {
-        'BACKEND': 'django.core.cache.backends.filebased.FileBasedCache',
-        'LOCATION': '/a/cache/datatracker/slowpages',
-        'OPTIONS': {
-            'MAX_ENTRIES': 5000,
-        },
-    },
-}
-
 HTMLIZER_VERSION = 1
 HTMLIZER_URL_PREFIX = "/doc/html"
 HTMLIZER_CACHE_TIME = 60*60*24*14       # 14 days
@@ -766,15 +850,13 @@ AUDIO_IMPORT_EMAIL = ['ietf@meetecho.com']
 SESSION_REQUEST_FROM_EMAIL = 'IETF Meeting Session Request Tool <session-request@ietf.org>' 
 
 SECRETARIAT_SUPPORT_EMAIL = "support@ietf.org"
-SECRETARIAT_ACTION_EMAIL = "ietf-action@ietf.org"
-SECRETARIAT_INFO_EMAIL = "ietf-info@ietf.org"
+SECRETARIAT_ACTION_EMAIL = SECRETARIAT_SUPPORT_EMAIL
+SECRETARIAT_INFO_EMAIL = SECRETARIAT_SUPPORT_EMAIL
 
 # Put real password in settings_local.py
 IANA_SYNC_PASSWORD = "secret"
 IANA_SYNC_CHANGES_URL = "https://datatracker.iana.org:4443/data-tracker/changes"
 IANA_SYNC_PROTOCOLS_URL = "https://www.iana.org/protocols/"
-
-RFC_TEXT_RSYNC_SOURCE="ftp.rfc-editor.org::rfcs-text-only"
 
 RFC_EDITOR_SYNC_PASSWORD="secret"
 RFC_EDITOR_SYNC_NOTIFICATION_URL = "https://www.rfc-editor.org/parser/parser.php"
@@ -793,7 +875,7 @@ NOMCOM_PUBLIC_KEYS_DIR = '/a/www/nomcom/public_keys/'
 NOMCOM_FROM_EMAIL = 'nomcom-chair-{year}@ietf.org'
 OPENSSL_COMMAND = '/usr/bin/openssl'
 DAYS_TO_EXPIRE_NOMINATION_LINK = ''
-NOMINEE_FEEDBACK_TYPES = ['comment', 'questio', 'nomina']
+NOMINEE_FEEDBACK_TYPES = ['comment', 'questio', 'nomina', 'obe']
 
 # SlideSubmission settings
 SLIDE_STAGING_PATH = '/a/www/www6s/staging/'
@@ -848,7 +930,8 @@ IDSUBMIT_CHECKER_CLASSES = (
 # Max time to allow for validation before a submission is subject to cancellation
 IDSUBMIT_MAX_VALIDATION_TIME = datetime.timedelta(minutes=20)
 
-IDSUBMIT_MANUAL_STAGING_DIR = '/tmp/'
+# Age at which a submission expires if not posted
+IDSUBMIT_EXPIRATION_AGE = datetime.timedelta(days=14)
 
 IDSUBMIT_FILE_TYPES = (
     'txt',
@@ -888,6 +971,7 @@ MEETING_MATERIALS_SERVE_LOCALLY = True
 MEETING_DOC_LOCAL_HREFS = {
     "agenda": "/meeting/{meeting.number}/materials/{doc.name}-{doc.rev}",
     "minutes": "/meeting/{meeting.number}/materials/{doc.name}-{doc.rev}",
+    "narrativeminutes": "/meeting/{meeting.number}/materials/{doc.name}-{doc.rev}",
     "slides": "/meeting/{meeting.number}/materials/{doc.name}-{doc.rev}",
     "chatlog": "/meeting/{meeting.number}/materials/{doc.name}-{doc.rev}",
     "polls": "/meeting/{meeting.number}/materials/{doc.name}-{doc.rev}",
@@ -899,6 +983,7 @@ MEETING_DOC_LOCAL_HREFS = {
 MEETING_DOC_CDN_HREFS = {
     "agenda": "https://www.ietf.org/proceedings/{meeting.number}/agenda/{doc.name}-{doc.rev}",
     "minutes": "https://www.ietf.org/proceedings/{meeting.number}/minutes/{doc.name}-{doc.rev}",
+    "narrativeminutes": "https://www.ietf.org/proceedings/{meeting.number}/narrative-minutes/{doc.name}-{doc.rev}",
     "slides": "https://www.ietf.org/proceedings/{meeting.number}/slides/{doc.name}-{doc.rev}",
     "recording": "{doc.external_url}",
     "bluesheets": "https://www.ietf.org/proceedings/{meeting.number}/bluesheets/{doc.uploaded_filename}",
@@ -910,6 +995,7 @@ MEETING_DOC_HREFS = MEETING_DOC_LOCAL_HREFS if MEETING_MATERIALS_SERVE_LOCALLY e
 MEETING_DOC_OLD_HREFS = {
     "agenda": "/meeting/{meeting.number}/materials/{doc.name}",
     "minutes": "/meeting/{meeting.number}/materials/{doc.name}",
+    "narrativeminutes" : "/meeting/{meeting.number}/materials/{doc.name}",
     "slides": "/meeting/{meeting.number}/materials/{doc.name}",
     "recording": "{doc.external_url}",
     "bluesheets": "https://www.ietf.org/proceedings/{meeting.number}/bluesheets/{doc.uploaded_filename}",
@@ -919,6 +1005,7 @@ MEETING_DOC_OLD_HREFS = {
 MEETING_DOC_GREFS = {
     "agenda": "/meeting/{meeting.number}/materials/{doc.name}",
     "minutes": "/meeting/{meeting.number}/materials/{doc.name}",
+    "narrativeminutes": "/meeting/{meeting.number}/materials/{doc.name}",
     "slides": "/meeting/{meeting.number}/materials/{doc.name}",
     "recording": "{doc.external_url}",
     "bluesheets": "https://www.ietf.org/proceedings/{meeting.number}/bluesheets/{doc.uploaded_filename}",
@@ -932,6 +1019,7 @@ MEETING_MATERIALS_DEFAULT_SUBMISSION_CORRECTION_DAYS = 50
 MEETING_VALID_UPLOAD_EXTENSIONS = {
     'agenda':       ['.txt','.html','.htm', '.md', ],
     'minutes':      ['.txt','.html','.htm', '.md', '.pdf', ],
+    'narrativeminutes': ['.txt','.html','.htm', '.md', '.pdf', ],
     'slides':       ['.doc','.docx','.pdf','.ppt','.pptx','.txt', ], # Note the removal of .zip
     'bluesheets':   ['.pdf', '.txt', ],
     'procmaterials':['.pdf', ],
@@ -941,6 +1029,7 @@ MEETING_VALID_UPLOAD_EXTENSIONS = {
 MEETING_VALID_UPLOAD_MIME_TYPES = {
     'agenda':       ['text/plain', 'text/html', 'text/markdown', 'text/x-markdown', ],
     'minutes':      ['text/plain', 'text/html', 'application/pdf', 'text/markdown', 'text/x-markdown', ],
+    'narrativeminutes': ['text/plain', 'text/html', 'application/pdf', 'text/markdown', 'text/x-markdown', ],
     'slides':       [],
     'bluesheets':   ['application/pdf', 'text/plain', ],
     'procmaterials':['application/pdf', ],
@@ -995,31 +1084,27 @@ OIDC_EXTRA_SCOPE_CLAIMS = 'ietf.ietfauth.utils.OidcExtraScopeClaims'
 # ==============================================================================
 
 
-RSYNC_BINARY = '/usr/bin/rsync'
 YANGLINT_BINARY = '/usr/bin/yanglint'
 DE_GFM_BINARY = '/usr/bin/de-gfm.ruby2.5'
 
 # Account settings
 DAYS_TO_EXPIRE_REGISTRATION_LINK = 3
 MINUTES_TO_EXPIRE_RESET_PASSWORD_LINK = 60
-HTPASSWD_COMMAND = "/usr/bin/htpasswd"
-HTPASSWD_FILE = "/www/htpasswd"
 
 # Generation of pdf files
 GHOSTSCRIPT_COMMAND = "/usr/bin/gs"
 
-# Generation of bibxml files (currently only for internet drafts)
+# Generation of bibxml files (currently only for Internet-Drafts)
 BIBXML_BASE_PATH = '/a/ietfdata/derived/bibxml'
 
 # Timezone files for iCalendar
 TZDATA_ICS_PATH = BASE_DIR + '/../vzic/zoneinfo/'
 
-SECR_BLUE_SHEET_PATH = '/a/www/ietf-datatracker/documents/blue_sheet.rtf'
-SECR_BLUE_SHEET_URL = IDTRACKER_BASE_URL + '/documents/blue_sheet.rtf'
-SECR_INTERIM_LISTING_DIR = '/a/www/www6/meeting/interim'
-SECR_MAX_UPLOAD_SIZE = 40960000
-SECR_PROCEEDINGS_DIR = '/a/www/www6s/proceedings/'
-SECR_PPT2PDF_COMMAND = ['/usr/bin/soffice','--headless','--convert-to','pdf:writer_globaldocument_pdf_Export','--outdir']
+DATATRACKER_MAX_UPLOAD_SIZE = 40960000
+PPT2PDF_COMMAND = [
+    "/usr/bin/soffice", "--headless", "--convert-to", "pdf:writer_globaldocument_pdf_Export", "--outdir"
+]
+
 STATS_REGISTRATION_ATTENDEES_JSON_URL = 'https://registration.ietf.org/{number}/attendees/'
 PROCEEDINGS_VERSION_CHANGES = [
     0,   # version 1
@@ -1040,7 +1125,6 @@ CHAT_URL_PATTERN = 'https://zulip.ietf.org/#narrow/stream/{chat_room_name}'
 # CHAT_ARCHIVE_URL_PATTERN = 'https://www.ietf.org/jabber/logs/{chat_room_name}?C=M;O=D'
 
 PYFLAKES_DEFAULT_ARGS= ["ietf", ]
-VULTURE_DEFAULT_ARGS= ["ietf", ]
 
 # Automatic Scheduling
 #
@@ -1087,16 +1171,6 @@ GROUP_ALIAS_DOMAIN = IETF_DOMAIN
 
 TEST_DATA_DIR = os.path.abspath(BASE_DIR + "/../test/data")
 
-# Path to the email alias lists.  Used by ietf.utils.aliases
-DRAFT_ALIASES_PATH = os.path.join(TEST_DATA_DIR, "draft-aliases")
-DRAFT_VIRTUAL_PATH = os.path.join(TEST_DATA_DIR, "draft-virtual")
-DRAFT_VIRTUAL_DOMAIN = "virtual.ietf.org"
-
-GROUP_ALIASES_PATH = os.path.join(TEST_DATA_DIR, "group-aliases")
-GROUP_VIRTUAL_PATH = os.path.join(TEST_DATA_DIR, "group-virtual")
-GROUP_VIRTUAL_DOMAIN = "virtual.ietf.org"
-
-POSTCONFIRM_PATH   = "/a/postconfirm/wrapper"
 
 USER_PREFERENCE_DEFAULTS = {
     "expires_soon"  : "14",
@@ -1112,20 +1186,22 @@ EXCLUDED_PERSONAL_EMAIL_REGEX_PATTERNS = [
     "@ietf.org$",
 ]
 
+# Configuration for django-markup
 MARKUP_SETTINGS = {
     'restructuredtext': {
         'settings_overrides': {
+            'report_level': 3,  # error (3) or severe (4) only
             'initial_header_level': 3,
             'doctitle_xform': False,
             'footnote_references': 'superscript',
             'trim_footnote_reference_space': True,
             'default_reference_context': 'view',
+            'raw_enabled': False,  # critical for security
+            'file_insertion_enabled': False,  # critical for security
             'link_base': ''
         }
     }
 }
-
-MAILMAN_LIB_DIR = '/usr/lib/mailman'
 
 # This is the number of seconds required between subscribing to an ietf
 # mailing list and datatracker account creation being accepted
@@ -1135,14 +1211,13 @@ ACCOUNT_REQUEST_EMAIL = 'account-request@ietf.org'
 
 SILENCED_SYSTEM_CHECKS = [
     "fields.W342",  # Setting unique=True on a ForeignKey has the same effect as using a OneToOneField.
+    "fields.W905",  # django.contrib.postgres.fields.CICharField is deprecated. (see https://github.com/ietf-tools/datatracker/issues/5660)
 ]
 
 CHECKS_LIBRARY_PATCHES_TO_APPLY = [
     'patch/change-oidc-provider-field-sizes-228.patch',
     'patch/fix-oidc-access-token-post.patch',
     'patch/fix-jwkest-jwt-logging.patch',
-    'patch/fix-django-password-strength-kwargs.patch',
-    'patch/add-django-http-cookie-value-none.patch',
     'patch/django-cookie-delete-with-all-settings.patch',
     'patch/tastypie-django22-fielderror-response.patch',
 ]
@@ -1185,6 +1260,15 @@ CELERY_TIMEZONE = 'UTC'
 CELERY_BROKER_URL = 'amqp://mq/'
 CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
 CELERY_BEAT_SYNC_EVERY = 1  # update DB after every event
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True  # the default, but setting it squelches a warning
+# Use a result backend so we can chain tasks. This uses the rpc backend, see
+# https://docs.celeryq.dev/en/stable/userguide/tasks.html#rpc-result-backend-rabbitmq-qpid
+# Results can be retrieved only once and only by the caller of the task. Results will be
+# lost if the message broker restarts.
+CELERY_RESULT_BACKEND = 'django-cache'  # use a Django cache for results
+CELERY_CACHE_BACKEND = 'celery-results'  # which Django cache to use
+CELERY_RESULT_EXPIRES = datetime.timedelta(minutes=5)  # how long are results valid? (Default is 1 day)
+CELERY_TASK_IGNORE_RESULT = True  # ignore results unless specifically enabled for a task
 
 # Meetecho API setup: Uncomment this and provide real credentials to enable
 # Meetecho conference creation for interim session requests
@@ -1194,8 +1278,17 @@ CELERY_BEAT_SYNC_EVERY = 1  # update DB after every event
 #     'client_id': 'datatracker',
 #     'client_secret': 'some secret',
 #     'request_timeout': 3.01,  # python-requests doc recommend slightly > a multiple of 3 seconds
+#     # How many minutes before/after session to enable slide update API. Defaults to 15. Set to None to disable,
+#     # or < 0 to _always_ send updates (useful for debugging)
+#     'slides_notify_time': 15, 
+#     'debug': False,  # if True, API calls will be echoed as debug instead of sent (only works for slides for now)
 # }
 
+# Meetecho URLs - instantiate with url.format(session=some_session)
+MEETECHO_ONSITE_TOOL_URL = "https://meetings.conf.meetecho.com/onsite{session.meeting.number}/?session={session.pk}"
+MEETECHO_VIDEO_STREAM_URL = "https://meetings.conf.meetecho.com/ietf{session.meeting.number}/?session={session.pk}"
+MEETECHO_AUDIO_STREAM_URL = "https://mp3.conf.meetecho.com/ietf{session.meeting.number}/{session.pk}.m3u"
+MEETECHO_SESSION_RECORDING_URL = "https://meetecho-player.ietf.org/playout/?session={session_label}"
 
 # Put the production SECRET_KEY in settings_local.py, and also any other
 # sensitive or site-specific changes.  DO NOT commit settings_local.py to svn.
@@ -1216,6 +1309,100 @@ else:
     MIDDLEWARE += DEV_MIDDLEWARE
     TEMPLATES[0]['OPTIONS']['context_processors'] += DEV_TEMPLATE_CONTEXT_PROCESSORS
 
+if "CACHES" not in locals():
+    if SERVER_MODE == "production":
+        MEMCACHED_HOST = os.environ.get("MEMCACHED_SERVICE_HOST", "127.0.0.1")
+        MEMCACHED_PORT = os.environ.get("MEMCACHED_SERVICE_PORT", "11211")
+        CACHES = {
+            "default": {
+                "BACKEND": "ietf.utils.cache.LenientMemcacheCache",
+                "LOCATION": f"{MEMCACHED_HOST}:{MEMCACHED_PORT}",
+                "VERSION": __version__,
+                "KEY_PREFIX": "ietf:dt",
+                "KEY_FUNCTION": lambda key, key_prefix, version: (
+                    f"{key_prefix}:{version}:{sha384(str(key).encode('utf8')).hexdigest()}"
+                ),
+            },
+            "sessions": {
+                "BACKEND": "ietf.utils.cache.LenientMemcacheCache",
+                "LOCATION": f"{MEMCACHED_HOST}:{MEMCACHED_PORT}",
+                # No release-specific VERSION setting.
+                "KEY_PREFIX": "ietf:dt",
+            },
+            "htmlized": {
+                "BACKEND": "django.core.cache.backends.filebased.FileBasedCache",
+                "LOCATION": "/a/cache/datatracker/htmlized",
+                "OPTIONS": {
+                    "MAX_ENTRIES": 100000,  # 100,000
+                },
+            },
+            "pdfized": {
+                "BACKEND": "django.core.cache.backends.filebased.FileBasedCache",
+                "LOCATION": "/a/cache/datatracker/pdfized",
+                "OPTIONS": {
+                    "MAX_ENTRIES": 100000,  # 100,000
+                },
+            },
+            "slowpages": {
+                "BACKEND": "django.core.cache.backends.filebased.FileBasedCache",
+                "LOCATION": "/a/cache/datatracker/slowpages",
+                "OPTIONS": {
+                    "MAX_ENTRIES": 5000,
+                },
+            },
+            "celery-results": {
+                "BACKEND": "django.core.cache.backends.memcached.PyMemcacheCache",
+                "LOCATION": f"{MEMCACHED_HOST}:{MEMCACHED_PORT}",
+                "KEY_PREFIX": "ietf:celery",
+            },
+        }
+    else:
+        CACHES = {
+            "default": {
+                "BACKEND": "django.core.cache.backends.dummy.DummyCache",
+                #'BACKEND': 'ietf.utils.cache.LenientMemcacheCache',
+                #'LOCATION': '127.0.0.1:11211',
+                #'BACKEND': 'django.core.cache.backends.filebased.FileBasedCache',
+                "VERSION": __version__,
+                "KEY_PREFIX": "ietf:dt",
+            },
+            "sessions": {
+                "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            },
+            "htmlized": {
+                "BACKEND": "django.core.cache.backends.dummy.DummyCache",
+                #'BACKEND': 'django.core.cache.backends.filebased.FileBasedCache',
+                "LOCATION": "/var/cache/datatracker/htmlized",
+                "OPTIONS": {
+                    "MAX_ENTRIES": 1000,
+                },
+            },
+            "pdfized": {
+                "BACKEND": "django.core.cache.backends.dummy.DummyCache",
+                #'BACKEND': 'django.core.cache.backends.filebased.FileBasedCache',
+                "LOCATION": "/var/cache/datatracker/pdfized",
+                "OPTIONS": {
+                    "MAX_ENTRIES": 1000,
+                },
+            },
+            "slowpages": {
+                "BACKEND": "django.core.cache.backends.dummy.DummyCache",
+                #'BACKEND': 'django.core.cache.backends.filebased.FileBasedCache',
+                "LOCATION": "/var/cache/datatracker/",
+                "OPTIONS": {
+                    "MAX_ENTRIES": 5000,
+                },
+            },
+            "celery-results": {
+                "BACKEND": "django.core.cache.backends.memcached.PyMemcacheCache",
+                "LOCATION": "app:11211",
+                "KEY_PREFIX": "ietf:celery",
+            },
+        }
+
+PUBLISH_IPR_STATES = ['posted', 'removed', 'removed_objfalse']
+
+ADVERTISE_VERSIONS = ["markdown", "pyang", "rfc2html", "xml2rfc"]
 
 # We provide a secret key only for test and development modes.  It's
 # absolutely vital that django fails to start in production mode unless a
@@ -1226,44 +1413,6 @@ if SERVER_MODE != 'production':
     loaders = TEMPLATES[0]['OPTIONS']['loaders']
     loaders = tuple(l for e in loaders for l in (e[1] if isinstance(e, tuple) and "cached.Loader" in e[0] else (e,)))
     TEMPLATES[0]['OPTIONS']['loaders'] = loaders
-
-    CACHES = {
-        'default': {
-            'BACKEND': 'django.core.cache.backends.dummy.DummyCache',
-            #'BACKEND': 'django.core.cache.backends.memcached.MemcachedCache',
-            #'LOCATION': '127.0.0.1:11211',
-            #'BACKEND': 'django.core.cache.backends.filebased.FileBasedCache',
-            'VERSION': __version__,
-            'KEY_PREFIX': 'ietf:dt',
-        },
-        'sessions': {
-            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
-        },
-        'htmlized': {
-            'BACKEND': 'django.core.cache.backends.dummy.DummyCache',
-            #'BACKEND': 'django.core.cache.backends.filebased.FileBasedCache',
-            'LOCATION': '/var/cache/datatracker/htmlized',
-            'OPTIONS': {
-                'MAX_ENTRIES': 1000,
-            },
-        },
-        'pdfized': {
-            'BACKEND': 'django.core.cache.backends.dummy.DummyCache',
-            #'BACKEND': 'django.core.cache.backends.filebased.FileBasedCache',
-            'LOCATION': '/var/cache/datatracker/pdfized',
-            'OPTIONS': {
-                'MAX_ENTRIES': 1000,
-            },
-        },
-        'slowpages': {
-            'BACKEND': 'django.core.cache.backends.dummy.DummyCache',
-            #'BACKEND': 'django.core.cache.backends.filebased.FileBasedCache',
-            'LOCATION': '/var/cache/datatracker/',
-            'OPTIONS': {
-                'MAX_ENTRIES': 5000,
-            },
-        },
-    }
     SESSION_ENGINE = "django.contrib.sessions.backends.db"
 
     if 'SECRET_KEY' not in locals():
@@ -1283,6 +1432,9 @@ if SERVER_MODE != 'production':
     # Cannot have this set to True if we're using http: from the dev-server:
     CSRF_COOKIE_SECURE = False
     CSRF_COOKIE_SAMESITE = 'Lax'
+    CSRF_TRUSTED_ORIGINS += ['http://localhost:8000', 'http://127.0.0.1:8000', 'http://[::1]:8000']
     SESSION_COOKIE_SECURE = False
     SESSION_COOKIE_SAMESITE = 'Lax'
-    
+
+
+YOUTUBE_DOMAINS = ['www.youtube.com', 'youtube.com', 'youtu.be', 'm.youtube.com', 'youtube-nocookie.com', 'www.youtube-nocookie.com']

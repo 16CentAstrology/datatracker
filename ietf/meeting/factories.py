@@ -9,6 +9,7 @@ import datetime
 from django.core.files.base import ContentFile
 from django.db.models import Q
 
+from ietf.doc.storage_utils import store_str
 from ietf.meeting.models import (Attended, Meeting, Session, SchedulingEvent, Schedule,
     TimeSlot, SessionPresentation, FloorPlan, Room, SlideSubmission, Constraint,
     MeetingHost, ProceedingsMaterial)
@@ -23,6 +24,7 @@ from ietf.utils.text import xslugify
 class MeetingFactory(factory.django.DjangoModelFactory):
     class Meta:
         model = Meeting
+        skip_postgeneration_save = True
 
     type_id = factory.Iterator(['ietf','interim'])
 
@@ -103,6 +105,7 @@ class MeetingFactory(factory.django.DjangoModelFactory):
 class SessionFactory(factory.django.DjangoModelFactory):
     class Meta:
         model = Session
+        skip_postgeneration_save = True
 
     meeting = factory.SubFactory(MeetingFactory)
     purpose_id = 'regular'
@@ -110,6 +113,7 @@ class SessionFactory(factory.django.DjangoModelFactory):
     group = factory.SubFactory(GroupFactory)
     requested_duration = datetime.timedelta(hours=1)
     on_agenda = factory.lazy_attribute(lambda obj: SessionPurposeName.objects.get(pk=obj.purpose_id).on_agenda)
+    has_onsite_tool = factory.lazy_attribute(lambda obj: obj.purpose_id == 'regular')
 
     @factory.post_generation
     def status_id(obj, create, extracted, **kwargs):
@@ -155,6 +159,7 @@ class ScheduleFactory(factory.django.DjangoModelFactory):
 class RoomFactory(factory.django.DjangoModelFactory):
     class Meta:
         model = Room
+        skip_postgeneration_save = True
 
     meeting = factory.SubFactory(MeetingFactory)
     name = factory.Faker('name')
@@ -171,6 +176,7 @@ class RoomFactory(factory.django.DjangoModelFactory):
 class TimeSlotFactory(factory.django.DjangoModelFactory):
     class Meta:
         model = TimeSlot
+        skip_postgeneration_save = True
 
     meeting = factory.SubFactory(MeetingFactory)
     type_id = 'regular'
@@ -224,6 +230,7 @@ class FloorPlanFactory(factory.django.DjangoModelFactory):
 class SlideSubmissionFactory(factory.django.DjangoModelFactory):
     class Meta:
         model = SlideSubmission
+        skip_postgeneration_save = True
 
     session = factory.SubFactory(SessionFactory)
     title = factory.Faker('sentence')
@@ -233,10 +240,15 @@ class SlideSubmissionFactory(factory.django.DjangoModelFactory):
     make_file = factory.PostGeneration(
                     lambda obj, create, extracted, **kwargs: open(obj.staged_filepath(),'a').close()
                 )
+    
+    store_submission = factory.PostGeneration(
+        lambda obj, create, extracted, **kwargs: store_str("staging", obj.filename, "")
+    )
 
 class ConstraintFactory(factory.django.DjangoModelFactory):
     class Meta:
         model = Constraint
+        skip_postgeneration_save = True
 
     meeting = factory.SubFactory(MeetingFactory)
     source = factory.SubFactory(GroupFactory)

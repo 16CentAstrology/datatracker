@@ -15,7 +15,7 @@ from django.utils.html import escape
 
 from ietf.doc.mails import (email_bofreq_title_changed, email_bofreq_editors_changed, 
     email_bofreq_new_revision, email_bofreq_responsible_changed)
-from ietf.doc.models import (Document, DocAlias, DocEvent, NewRevisionDocEvent, 
+from ietf.doc.models import (Document, DocEvent, NewRevisionDocEvent, 
     BofreqEditorDocEvent, BofreqResponsibleDocEvent, State)
 from ietf.doc.utils import add_state_change_event
 from ietf.doc.utils_bofreq import bofreq_editors, bofreq_responsible
@@ -101,6 +101,7 @@ def submit(request, name):
                 content = form.cleaned_data['bofreq_content']
             with io.open(bofreq.get_file_name(), 'w', encoding='utf-8') as destination:
                 destination.write(content)
+            bofreq.store_str(bofreq.get_base_name(), content)
             email_bofreq_new_revision(request, bofreq)
             return redirect('ietf.doc.views_doc.document_main', name=bofreq.name)
 
@@ -168,8 +169,6 @@ def new_bof_request(request):
             )
             e2.editors.set([request.user.person])
             bofreq.save_with_history([e1,e2])
-            alias = DocAlias.objects.create(name=name)
-            alias.docs.set([bofreq])
             bofreq_submission = form.cleaned_data['bofreq_submission']
             if bofreq_submission == "upload":
                 content = get_cleaned_text_file_content(form.cleaned_data["bofreq_file"])
@@ -177,6 +176,7 @@ def new_bof_request(request):
                 content = form.cleaned_data['bofreq_content']
             with io.open(bofreq.get_file_name(), 'w', encoding='utf-8') as destination:
                 destination.write(content)
+            bofreq.store_str(bofreq.get_base_name(), content)
             email_bofreq_new_revision(request, bofreq)
             return redirect('ietf.doc.views_doc.document_main', name=bofreq.name)
 

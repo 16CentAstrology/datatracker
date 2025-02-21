@@ -22,8 +22,8 @@ urlpatterns = [
     url(r'^(?P<year>\d{4})/private/view-feedback/nominee/(?P<nominee_id>\d+)$', views.view_feedback_nominee),
     url(r'^(?P<year>\d{4})/private/view-feedback/topic/(?P<topic_id>\d+)$', views.view_feedback_topic),
     url(r'^(?P<year>\d{4})/private/edit/nominee/(?P<nominee_id>\d+)$', views.edit_nominee),
-    url(r'^(?P<year>\d{4})/private/merge-nominee/?$', views.private_merge_nominee),
-    url(r'^(?P<year>\d{4})/private/merge-person/?$', views.private_merge_person),
+    url(r'^(?P<year>\d{4})/private/merge-nominee/$', views.private_merge_nominee),
+    url(r'^(?P<year>\d{4})/private/merge-person/$', views.private_merge_person),
     url(r'^(?P<year>\d{4})/private/send-reminder-mail/(?P<type>\w+)/$', views.send_reminder_mail),
     url(r'^(?P<year>\d{4})/private/extract-email-lists/$', views.extract_email_lists),
     url(r'^(?P<year>\d{4})/private/edit-members/$', views.edit_members),
@@ -41,6 +41,7 @@ urlpatterns = [
     url(r'^(?P<year>\d{4})/private/chair/eligible/$', views.private_eligible),
     url(r'^(?P<year>\d{4})/private/chair/volunteers/$', views.private_volunteers),
     url(r'^(?P<year>\d{4})/private/chair/volunteers/csv/$', views.private_volunteers_csv),
+    url(r'^(?P<year>\d{4})/private/chair/volunteers/announce-list/$', views.qualified_volunteer_list_for_announcement),
 
     url(r'^(?P<year>\d{4})/$', views.year_index),
     url(r'^(?P<year>\d{4})/requirements/$', views.requirements),

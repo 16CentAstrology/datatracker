@@ -149,6 +149,23 @@
   },
   {
     "fields": {
+      "doc_type": "draft",
+      "name": "RSAB Approve",
+      "order": 0,
+      "positions": [
+        "concern",
+        "yes",
+        "recuse"
+      ],
+      "question": "Is this draft ready for publication in the Editorial stream?",
+      "slug": "rsab-approve",
+      "used": true
+    },
+    "model": "doc.ballottype",
+    "pk": 8
+  },
+  {
+    "fields": {
       "desc": "",
       "name": "Active",
       "next_states": [],
@@ -295,7 +312,7 @@
       "order": 42,
       "slug": "watching",
       "type": "draft-iesg",
-      "used": true
+      "used": false
     },
     "model": "doc.state",
     "pk": 11
@@ -827,10 +844,10 @@
   },
   {
     "fields": {
-      "desc": "This document is awaiting the IAB itself to come to internal consensus.",
+      "desc": "The document has completed community review and is now being formally reviewed by the entire IAB in order to make a decision about whether it is ready to be published as an IAB-stream RFC.",
       "name": "IAB Review",
       "next_states": [],
-      "order": 4,
+      "order": 5,
       "slug": "review-i",
       "type": "draft-stream-iab",
       "used": true
@@ -843,7 +860,7 @@
       "desc": "This document has completed internal consensus within the IAB and is now under community review.",
       "name": "Community Review",
       "next_states": [],
-      "order": 5,
+      "order": 4,
       "slug": "review-c",
       "type": "draft-stream-iab",
       "used": true
@@ -2459,10 +2476,173 @@
   },
   {
     "fields": {
+      "desc": "",
+      "name": "Replaced editorial stream document",
+      "next_states": [],
+      "order": 0,
+      "slug": "repl",
+      "type": "draft-stream-editorial",
+      "used": true
+    },
+    "model": "doc.state",
+    "pk": 170
+  },
+  {
+    "fields": {
+      "desc": "",
+      "name": "Active editorial stream document",
+      "next_states": [],
+      "order": 2,
+      "slug": "active",
+      "type": "draft-stream-editorial",
+      "used": true
+    },
+    "model": "doc.state",
+    "pk": 171
+  },
+  {
+    "fields": {
+      "desc": "",
+      "name": "Editorial stream document under RSAB review",
+      "next_states": [],
+      "order": 3,
+      "slug": "rsabpoll",
+      "type": "draft-stream-editorial",
+      "used": true
+    },
+    "model": "doc.state",
+    "pk": 172
+  },
+  {
+    "fields": {
+      "desc": "",
+      "name": "Published RFC",
+      "next_states": [],
+      "order": 4,
+      "slug": "pub",
+      "type": "draft-stream-editorial",
+      "used": true
+    },
+    "model": "doc.state",
+    "pk": 173
+  },
+  {
+    "fields": {
+      "desc": "",
+      "name": "Dead editorial stream document",
+      "next_states": [],
+      "order": 5,
+      "slug": "dead",
+      "type": "draft-stream-editorial",
+      "used": true
+    },
+    "model": "doc.state",
+    "pk": 174
+  },
+  {
+    "fields": {
+      "desc": "The statement is active",
+      "name": "Active",
+      "next_states": [],
+      "order": 0,
+      "slug": "active",
+      "type": "statement",
+      "used": true
+    },
+    "model": "doc.state",
+    "pk": 175
+  },
+  {
+    "fields": {
+      "desc": "The statement has been replaced",
+      "name": "Replaced",
+      "next_states": [],
+      "order": 0,
+      "slug": "replaced",
+      "type": "statement",
+      "used": true
+    },
+    "model": "doc.state",
+    "pk": 176
+  },
+  {
+    "fields": {
+      "desc": "",
+      "name": "Published",
+      "next_states": [],
+      "order": 1,
+      "slug": "published",
+      "type": "rfc",
+      "used": true
+    },
+    "model": "doc.state",
+    "pk": 177
+  },
+  {
+    "fields": {
+      "desc": "",
+      "name": "Active",
+      "next_states": [],
+      "order": 0,
+      "slug": "active",
+      "type": "narrativeminutes",
+      "used": true
+    },
+    "model": "doc.state",
+    "pk": 178
+  },
+  {
+    "fields": {
+      "desc": "",
+      "name": "Deleted",
+      "next_states": [],
+      "order": 1,
+      "slug": "deleted",
+      "type": "narrativeminutes",
+      "used": true
+    },
+    "model": "doc.state",
+    "pk": 179
+  },
+  {
+    "fields": {
+      "desc": "The editorial stream processing of this document is complete and it has been sent to the RFC Editor for publication. The document may be in the RFC Editor's queue, or it may have been published as an RFC; this state doesn't distinguish between different states occurring after the document has left the RSAB.",
+      "name": "Sent to the RFC Editor",
+      "next_states": [],
+      "order": 10,
+      "slug": "rfc-edit",
+      "type": "draft-stream-editorial",
+      "used": true
+    },
+    "model": "doc.state",
+    "pk": 180
+  },
+  {
+    "fields": {
+      "desc": "The BOF request is spam",
+      "name": "Spam",
+      "next_states": [],
+      "order": 5,
+      "slug": "spam",
+      "type": "bofreq",
+      "used": true
+    },
+    "model": "doc.state",
+    "pk": 182
+  },
+  {
+    "fields": {
       "label": "State"
     },
     "model": "doc.statetype",
     "pk": "agenda"
+  },
+  {
+    "fields": {
+      "label": "bcp state"
+    },
+    "model": "doc.statetype",
+    "pk": "bcp"
   },
   {
     "fields": {
@@ -2508,13 +2688,6 @@
   },
   {
     "fields": {
-      "label": "IANA state"
-    },
-    "model": "doc.statetype",
-    "pk": "draft-iana"
-  },
-  {
-    "fields": {
       "label": "IANA Action state"
     },
     "model": "doc.statetype",
@@ -2550,6 +2723,13 @@
   },
   {
     "fields": {
+      "label": "Editorial stream state"
+    },
+    "model": "doc.statetype",
+    "pk": "draft-stream-editorial"
+  },
+  {
+    "fields": {
       "label": "IAB state"
     },
     "model": "doc.statetype",
@@ -2578,6 +2758,13 @@
   },
   {
     "fields": {
+      "label": "fyi state"
+    },
+    "model": "doc.statetype",
+    "pk": "fyi"
+  },
+  {
+    "fields": {
       "label": "State"
     },
     "model": "doc.statetype",
@@ -2596,6 +2783,13 @@
     },
     "model": "doc.statetype",
     "pk": "minutes"
+  },
+  {
+    "fields": {
+      "label": "State"
+    },
+    "model": "doc.statetype",
+    "pk": "narrativeminutes"
   },
   {
     "fields": {
@@ -2634,6 +2828,13 @@
   },
   {
     "fields": {
+      "label": "State"
+    },
+    "model": "doc.statetype",
+    "pk": "rfc"
+  },
+  {
+    "fields": {
       "label": "Shepherd's Writeup State"
     },
     "model": "doc.statetype",
@@ -2652,6 +2853,20 @@
     },
     "model": "doc.statetype",
     "pk": "statchg"
+  },
+  {
+    "fields": {
+      "label": "Statement State"
+    },
+    "model": "doc.statetype",
+    "pk": "statement"
+  },
+  {
+    "fields": {
+      "label": "std state"
+    },
+    "model": "doc.statetype",
+    "pk": "std"
   },
   {
     "fields": {
@@ -2697,7 +2912,7 @@
       "about_page": "ietf.group.views.group_about",
       "acts_like_wg": false,
       "admin_roles": "[\n    \"chair\"\n]",
-      "agenda_filter_type": "none",
+      "agenda_filter_type": "heading",
       "agenda_type": "ietf",
       "create_wiki": false,
       "custom_group_roles": false,
@@ -2711,12 +2926,12 @@
       "has_chartering_process": false,
       "has_default_chat": false,
       "has_documents": false,
-      "has_meetings": false,
+      "has_meetings": true,
       "has_milestones": false,
       "has_nonsession_materials": false,
       "has_reviews": false,
       "has_session_materials": false,
-      "is_schedulable": false,
+      "is_schedulable": true,
       "material_types": "[\n    \"slides\"\n]",
       "matman_roles": "[\n    \"chair\"\n]",
       "need_parent": false,
@@ -2724,7 +2939,7 @@
       "req_subm_approval": false,
       "role_order": "[\n    \"chair\"\n]",
       "session_purposes": "[\n    \"closed_meeting\",\n    \"officehours\"\n]",
-      "show_on_agenda": false
+      "show_on_agenda": true
     },
     "model": "group.groupfeatures",
     "pk": "adm"
@@ -2852,37 +3067,76 @@
       "about_page": "ietf.group.views.group_about",
       "acts_like_wg": false,
       "admin_roles": "[\n    \"chair\"\n]",
-      "agenda_filter_type": "none",
-      "agenda_type": "side",
+      "agenda_filter_type": "normal",
+      "agenda_type": "ietf",
       "create_wiki": false,
-      "custom_group_roles": true,
+      "custom_group_roles": false,
       "customize_workflow": false,
       "default_parent": "",
       "default_tab": "ietf.group.views.group_about",
-      "default_used_roles": "[\n    \"auth\",\n    \"chair\"\n]",
-      "docman_roles": "[]",
+      "default_used_roles": "[\n    \"chair\",\n    \"member\"\n]",
+      "docman_roles": "[\n    \"chair\"\n]",
       "groupman_authroles": "[\n    \"Secretariat\"\n]",
-      "groupman_roles": "[]",
+      "groupman_roles": "[\n    \"chair\"\n]",
       "has_chartering_process": false,
-      "has_default_chat": false,
+      "has_default_chat": true,
       "has_documents": false,
-      "has_meetings": false,
+      "has_meetings": true,
       "has_milestones": false,
       "has_nonsession_materials": false,
       "has_reviews": false,
-      "has_session_materials": false,
-      "is_schedulable": false,
+      "has_session_materials": true,
+      "is_schedulable": true,
       "material_types": "[\n    \"slides\"\n]",
-      "matman_roles": "[]",
+      "matman_roles": "[\n    \"chair\"\n]",
       "need_parent": false,
       "parent_types": [],
-      "req_subm_approval": true,
-      "role_order": "[\n    \"chair\",\n    \"secr\"\n]",
-      "session_purposes": "[\n    \"officehours\"\n]",
-      "show_on_agenda": false
+      "req_subm_approval": false,
+      "role_order": "[\n    \"chair\",\n    \"member\"\n]",
+      "session_purposes": "[\n    \"officehours\",\n    \"regular\"\n]",
+      "show_on_agenda": true
     },
     "model": "group.groupfeatures",
-    "pk": "editorial"
+    "pk": "edappr"
+  },
+  {
+    "fields": {
+      "about_page": "ietf.group.views.group_about",
+      "acts_like_wg": true,
+      "admin_roles": "[\n    \"chair\"\n]",
+      "agenda_filter_type": "normal",
+      "agenda_type": "ietf",
+      "create_wiki": false,
+      "custom_group_roles": false,
+      "customize_workflow": true,
+      "default_parent": "",
+      "default_tab": "ietf.group.views.group_documents",
+      "default_used_roles": "[\n    \"chair\"\n]",
+      "docman_roles": "[\n    \"chair\"\n]",
+      "groupman_authroles": "[\n    \"Secretariat\"\n]",
+      "groupman_roles": "[\n    \"chair\"\n]",
+      "has_chartering_process": false,
+      "has_default_chat": true,
+      "has_documents": true,
+      "has_meetings": true,
+      "has_milestones": false,
+      "has_nonsession_materials": false,
+      "has_reviews": false,
+      "has_session_materials": true,
+      "is_schedulable": true,
+      "material_types": "[\n    \"slides\"\n]",
+      "matman_roles": "[\n    \"chair\"\n]",
+      "need_parent": false,
+      "parent_types": [
+        "rfcedtyp"
+      ],
+      "req_subm_approval": true,
+      "role_order": "[\n    \"chair\"\n]",
+      "session_purposes": "[\n    \"regular\"\n]",
+      "show_on_agenda": true
+    },
+    "model": "group.groupfeatures",
+    "pk": "edwg"
   },
   {
     "fields": {
@@ -2961,6 +3215,45 @@
     },
     "model": "group.groupfeatures",
     "pk": "iabasg"
+  },
+  {
+    "fields": {
+      "about_page": "ietf.group.views.group_about",
+      "acts_like_wg": false,
+      "admin_roles": "[\n    \"chair\"\n]",
+      "agenda_filter_type": "none",
+      "agenda_type": "ietf",
+      "create_wiki": false,
+      "custom_group_roles": false,
+      "customize_workflow": false,
+      "default_parent": "iab",
+      "default_tab": "ietf.group.views.group_about",
+      "default_used_roles": "[]",
+      "docman_roles": "[\n    \"ad\",\n    \"chair\",\n    \"delegate\",\n    \"secr\"\n]",
+      "groupman_authroles": "[\n    \"Secretariat\"\n]",
+      "groupman_roles": "[\n    \"ad\",\n    \"chair\"\n]",
+      "has_chartering_process": false,
+      "has_default_chat": true,
+      "has_documents": true,
+      "has_meetings": true,
+      "has_milestones": false,
+      "has_nonsession_materials": false,
+      "has_reviews": false,
+      "has_session_materials": true,
+      "is_schedulable": false,
+      "material_types": "[\n    \"slides\"\n]",
+      "matman_roles": "[\n    \"ad\",\n    \"chair\",\n    \"delegate\",\n    \"secr\"\n]",
+      "need_parent": true,
+      "parent_types": [
+        "ietf"
+      ],
+      "req_subm_approval": false,
+      "role_order": "[\n    \"chair\",\n    \"secr\",\n    \"member\"\n]",
+      "session_purposes": "\"[\\\"regular\\\"]\"",
+      "show_on_agenda": false
+    },
+    "model": "group.groupfeatures",
+    "pk": "iabworkshop"
   },
   {
     "fields": {
@@ -3158,8 +3451,8 @@
       "about_page": "ietf.group.views.group_about",
       "acts_like_wg": false,
       "admin_roles": "[\n    \"chair\",\n    \"lead\"\n]",
-      "agenda_filter_type": "none",
-      "agenda_type": "ad",
+      "agenda_filter_type": "heading",
+      "agenda_type": "ietf",
       "create_wiki": false,
       "custom_group_roles": true,
       "customize_workflow": false,
@@ -3172,20 +3465,20 @@
       "has_chartering_process": false,
       "has_default_chat": false,
       "has_documents": true,
-      "has_meetings": false,
+      "has_meetings": true,
       "has_milestones": false,
       "has_nonsession_materials": false,
       "has_reviews": false,
       "has_session_materials": false,
-      "is_schedulable": false,
+      "is_schedulable": true,
       "material_types": "[\n    \"slides\"\n]",
       "matman_roles": "[\n    \"chair\",\n    \"delegate\"\n]",
       "need_parent": false,
       "parent_types": [],
       "req_subm_approval": true,
       "role_order": "[\n    \"chair\",\n    \"delegate\"\n]",
-      "session_purposes": "[\n    \"officehours\"\n]",
-      "show_on_agenda": false
+      "session_purposes": "[\n    \"officehours\",\n    \"regular\"\n]",
+      "show_on_agenda": true
     },
     "model": "group.groupfeatures",
     "pk": "ise"
@@ -3398,7 +3691,7 @@
       "default_parent": "",
       "default_tab": "ietf.group.views.group_about",
       "default_used_roles": "[\n    \"auth\",\n    \"chair\"\n]",
-      "docman_roles": "[]",
+      "docman_roles": "[\n    \"chair\"\n]",
       "groupman_authroles": "[\n    \"Secretariat\"\n]",
       "groupman_roles": "[\n    \"chair\"\n]",
       "has_chartering_process": false,
@@ -3611,7 +3904,7 @@
       ],
       "desc": "Recipients when a charter is approved",
       "to": [
-        "ietf_announce"
+        "group_stream_announce"
       ]
     },
     "model": "mailtrigger.mailtrigger",
@@ -3972,8 +4265,8 @@
         "doc_ad",
         "doc_group_chairs",
         "doc_group_delegates",
-        "doc_shepherd",
-        "doc_stream_manager"
+        "doc_non_ietf_stream_manager",
+        "doc_shepherd"
       ]
     },
     "model": "mailtrigger.mailtrigger",
@@ -4794,6 +5087,20 @@
   {
     "fields": {
       "cc": [
+        "review_doc_all_parties",
+        "review_doc_group_mail_list"
+      ],
+      "desc": "Recipients when a dnsdir Early review is completed",
+      "to": [
+        "review_team_mail_list"
+      ]
+    },
+    "model": "mailtrigger.mailtrigger",
+    "pk": "review_completed_dnsdir_early"
+  },
+  {
+    "fields": {
+      "cc": [
         "ietf_last_call",
         "review_doc_all_parties",
         "review_doc_group_mail_list"
@@ -4864,6 +5171,50 @@
     },
     "model": "mailtrigger.mailtrigger",
     "pk": "review_completed_genart_telechat"
+  },
+  {
+    "fields": {
+      "cc": [
+        "review_doc_all_parties",
+        "review_doc_group_mail_list"
+      ],
+      "desc": "Recipients when a httpdir Early review is completed",
+      "to": [
+        "review_team_mail_list"
+      ]
+    },
+    "model": "mailtrigger.mailtrigger",
+    "pk": "review_completed_httpdir_early"
+  },
+  {
+    "fields": {
+      "cc": [
+        "ietf_last_call",
+        "review_doc_all_parties",
+        "review_doc_group_mail_list"
+      ],
+      "desc": "Recipients when a httpdir Last Call review is completed",
+      "to": [
+        "review_team_mail_list"
+      ]
+    },
+    "model": "mailtrigger.mailtrigger",
+    "pk": "review_completed_httpdir_lc"
+  },
+  {
+    "fields": {
+      "cc": [
+        "ietf_last_call",
+        "review_doc_all_parties",
+        "review_doc_group_mail_list"
+      ],
+      "desc": "Recipients when a httpdir Telechat review is completed",
+      "to": [
+        "review_team_mail_list"
+      ]
+    },
+    "model": "mailtrigger.mailtrigger",
+    "pk": "review_completed_httpdir_telechat"
   },
   {
     "fields": {
@@ -5257,6 +5608,46 @@
   {
     "fields": {
       "cc": [
+        "doc_affecteddoc_authors",
+        "doc_affecteddoc_group_chairs",
+        "doc_affecteddoc_notify",
+        "doc_authors",
+        "doc_group_chairs",
+        "doc_group_mail_list",
+        "doc_notify",
+        "doc_shepherd"
+      ],
+      "desc": "Recipients when a new RSAB ballot is issued",
+      "to": [
+        "rsab"
+      ]
+    },
+    "model": "mailtrigger.mailtrigger",
+    "pk": "rsab_ballot_issued"
+  },
+  {
+    "fields": {
+      "cc": [
+        "doc_affecteddoc_authors",
+        "doc_affecteddoc_group_chairs",
+        "doc_affecteddoc_notify",
+        "doc_authors",
+        "doc_group_chairs",
+        "doc_group_mail_list",
+        "doc_notify",
+        "doc_shepherd"
+      ],
+      "desc": "Recipients when a new RSAB ballot position with comments is saved",
+      "to": [
+        "rsab"
+      ]
+    },
+    "model": "mailtrigger.mailtrigger",
+    "pk": "rsab_ballot_saved"
+  },
+  {
+    "fields": {
+      "cc": [
         "group_responsible_directors"
       ],
       "desc": "Recipients when a group is sent a reminder to submit minutes for a session",
@@ -5348,7 +5739,22 @@
   },
   {
     "fields": {
-      "cc": [],
+      "cc": [
+        "group_chairs"
+      ],
+      "desc": "Recipients when slides are approved for a given session",
+      "to": [
+        "slides_proposer"
+      ]
+    },
+    "model": "mailtrigger.mailtrigger",
+    "pk": "slides_approved"
+  },
+  {
+    "fields": {
+      "cc": [
+        "slides_proposer"
+      ],
       "desc": "Recipients when slides are proposed for a given session",
       "to": [
         "group_chairs",
@@ -5590,7 +5996,7 @@
   {
     "fields": {
       "desc": "The document's authors",
-      "template": "{% if doc.type_id == \"draft\" %}<{{doc.name}}@ietf.org>{% endif %}"
+      "template": "{% if doc.type_id == \"draft\" or doc.type_id == \"rfc\" %}<{{doc.name}}@ietf.org>{% endif %}"
     },
     "model": "mailtrigger.recipient",
     "pk": "doc_authors"
@@ -5845,7 +6251,7 @@
   },
   {
     "fields": {
-      "desc": "The internet drafts ticketing system",
+      "desc": "The Internet-Draft ticketing system",
       "template": "<internet-drafts@ietf.org>"
     },
     "model": "mailtrigger.recipient",
@@ -5909,7 +6315,7 @@
   },
   {
     "fields": {
-      "desc": "The set of people who can approve this liaison statements",
+      "desc": "The set of people who can approve this liaison statement",
       "template": "{{liaison.approver_emails|join:\", \"}}"
     },
     "model": "mailtrigger.recipient",
@@ -6117,6 +6523,14 @@
   },
   {
     "fields": {
+      "desc": "The RFC Series Approval Board",
+      "template": "The RSAB <rsab@rfc-editor.org>"
+    },
+    "model": "mailtrigger.recipient",
+    "pk": "rsab"
+  },
+  {
+    "fields": {
       "desc": "The person that requested a meeting slot for a given group",
       "template": null
     },
@@ -6130,6 +6544,14 @@
     },
     "model": "mailtrigger.recipient",
     "pk": "session_requests"
+  },
+  {
+    "fields": {
+      "desc": "Person who proposed slides",
+      "template": "{{ proposer.email }}"
+    },
+    "model": "mailtrigger.recipient",
+    "pk": "slides_proposer"
   },
   {
     "fields": {
@@ -6357,6 +6779,56 @@
   },
   {
     "fields": {
+      "desc": "The content of an appeal",
+      "name": "Appeal",
+      "order": 1,
+      "used": true
+    },
+    "model": "name.appealartifacttypename",
+    "pk": "appeal"
+  },
+  {
+    "fields": {
+      "desc": "The content of an appeal combined with the content of a response",
+      "name": "Response (with appeal included)",
+      "order": 2,
+      "used": true
+    },
+    "model": "name.appealartifacttypename",
+    "pk": "appeal_with_response"
+  },
+  {
+    "fields": {
+      "desc": "Other content related to an appeal",
+      "name": "Other content",
+      "order": 5,
+      "used": true
+    },
+    "model": "name.appealartifacttypename",
+    "pk": "other_content"
+  },
+  {
+    "fields": {
+      "desc": "The content of a reply to an appeal response",
+      "name": "Reply to response",
+      "order": 4,
+      "used": true
+    },
+    "model": "name.appealartifacttypename",
+    "pk": "reply_to_response"
+  },
+  {
+    "fields": {
+      "desc": "The content of a response to an appeal",
+      "name": "Response",
+      "order": 3,
+      "used": true
+    },
+    "model": "name.appealartifacttypename",
+    "pk": "response"
+  },
+  {
+    "fields": {
       "blocking": false,
       "desc": "",
       "name": "Abstain",
@@ -6376,6 +6848,17 @@
     },
     "model": "name.ballotpositionname",
     "pk": "block"
+  },
+  {
+    "fields": {
+      "blocking": true,
+      "desc": "",
+      "name": "Concern",
+      "order": 0,
+      "used": true
+    },
+    "model": "name.ballotpositionname",
+    "pk": "concern"
   },
   {
     "fields": {
@@ -9665,6 +10148,17 @@
   {
     "fields": {
       "desc": "",
+      "name": "became RFC",
+      "order": 0,
+      "revname": "came from draft",
+      "used": true
+    },
+    "model": "name.docrelationshipname",
+    "pk": "became_rfc"
+  },
+  {
+    "fields": {
+      "desc": "",
       "name": "conflict reviews",
       "order": 0,
       "revname": "Conflict reviewed by",
@@ -9672,6 +10166,17 @@
     },
     "model": "name.docrelationshipname",
     "pk": "conflrev"
+  },
+  {
+    "fields": {
+      "desc": "This document contains other documents (e.g., STDs contain RFCs)",
+      "name": "Contains",
+      "order": 0,
+      "revname": "Is part of",
+      "used": true
+    },
+    "model": "name.docrelationshipname",
+    "pk": "contains"
   },
   {
     "fields": {
@@ -10192,6 +10697,17 @@
   {
     "fields": {
       "desc": "",
+      "name": "Best Current Practice",
+      "order": 0,
+      "prefix": "bcp",
+      "used": true
+    },
+    "model": "name.doctypename",
+    "pk": "bcp"
+  },
+  {
+    "fields": {
+      "desc": "",
       "name": "Bluesheets",
       "order": 0,
       "prefix": "bluesheets",
@@ -10258,6 +10774,17 @@
   {
     "fields": {
       "desc": "",
+      "name": "For Your Information",
+      "order": 0,
+      "prefix": "fyi",
+      "used": true
+    },
+    "model": "name.doctypename",
+    "pk": "fyi"
+  },
+  {
+    "fields": {
+      "desc": "",
       "name": "Liaison Attachment",
       "order": 0,
       "prefix": "liai-att",
@@ -10287,6 +10814,17 @@
     },
     "model": "name.doctypename",
     "pk": "minutes"
+  },
+  {
+    "fields": {
+      "desc": "",
+      "name": "Narrative Minutes",
+      "order": 0,
+      "prefix": "narrative-minutes",
+      "used": true
+    },
+    "model": "name.doctypename",
+    "pk": "narrativeminutes"
   },
   {
     "fields": {
@@ -10335,6 +10873,17 @@
   {
     "fields": {
       "desc": "",
+      "name": "RFC",
+      "order": 0,
+      "prefix": "rfc",
+      "used": true
+    },
+    "model": "name.doctypename",
+    "pk": "rfc"
+  },
+  {
+    "fields": {
+      "desc": "",
       "name": "Shepherd's writeup",
       "order": 0,
       "prefix": "shepherd",
@@ -10364,6 +10913,28 @@
     },
     "model": "name.doctypename",
     "pk": "statchg"
+  },
+  {
+    "fields": {
+      "desc": "",
+      "name": "Statement",
+      "order": 0,
+      "prefix": "statement",
+      "used": true
+    },
+    "model": "name.doctypename",
+    "pk": "statement"
+  },
+  {
+    "fields": {
+      "desc": "",
+      "name": "Standard",
+      "order": 0,
+      "prefix": "std",
+      "used": true
+    },
+    "model": "name.doctypename",
+    "pk": "std"
   },
   {
     "fields": {
@@ -10734,8 +11305,8 @@
   },
   {
     "fields": {
-      "desc": "Issuer Tracker",
-      "name": "Issuer Tracker",
+      "desc": "Issue Tracker",
+      "name": "Issue Tracker",
       "order": 0,
       "type": "url",
       "used": true
@@ -10831,8 +11402,9 @@
   {
     "fields": {
       "desc": "",
+      "legend": "C",
       "name": "Comment",
-      "order": 0,
+      "order": 1,
       "used": true
     },
     "model": "name.feedbacktypename",
@@ -10841,8 +11413,9 @@
   {
     "fields": {
       "desc": "",
+      "legend": "J",
       "name": "Junk",
-      "order": 0,
+      "order": 5,
       "used": true
     },
     "model": "name.feedbacktypename",
@@ -10851,8 +11424,9 @@
   {
     "fields": {
       "desc": "",
+      "legend": "N",
       "name": "Nomination",
-      "order": 0,
+      "order": 2,
       "used": true
     },
     "model": "name.feedbacktypename",
@@ -10861,8 +11435,20 @@
   {
     "fields": {
       "desc": "",
+      "legend": "O",
+      "name": "Overcome by events",
+      "order": 4,
+      "used": true
+    },
+    "model": "name.feedbacktypename",
+    "pk": "obe"
+  },
+  {
+    "fields": {
+      "desc": "",
+      "legend": "Q",
       "name": "Questionnaire response",
-      "order": 0,
+      "order": 3,
       "used": true
     },
     "model": "name.feedbacktypename",
@@ -10871,8 +11457,9 @@
   {
     "fields": {
       "desc": "",
+      "legend": "R",
       "name": "Read",
-      "order": 0,
+      "order": 6,
       "used": true
     },
     "model": "name.feedbacktypename",
@@ -11125,14 +11712,25 @@
   },
   {
     "fields": {
-      "desc": "Editorial Stream Group",
-      "name": "Editorial",
+      "desc": "Editorial Stream Approval Group",
+      "name": "Editorial Stream Approval Group",
       "order": 0,
       "used": true,
-      "verbose_name": ""
+      "verbose_name": "Editorial Stream Approval Group"
     },
     "model": "name.grouptypename",
-    "pk": "editorial"
+    "pk": "edappr"
+  },
+  {
+    "fields": {
+      "desc": "Editorial Stream Working Group",
+      "name": "Editorial Stream Working Group",
+      "order": 0,
+      "used": true,
+      "verbose_name": "Editorial Stream Working Group"
+    },
+    "model": "name.grouptypename",
+    "pk": "edwg"
   },
   {
     "fields": {
@@ -11155,6 +11753,17 @@
     },
     "model": "name.grouptypename",
     "pk": "iabasg"
+  },
+  {
+    "fields": {
+      "desc": "IAB Workshop",
+      "name": "IAB Workshop",
+      "order": 0,
+      "used": true,
+      "verbose_name": "IAB Workshop"
+    },
+    "model": "name.grouptypename",
+    "pk": "iabworkshop"
   },
   {
     "fields": {
@@ -11250,7 +11859,7 @@
       "name": "Program",
       "order": 0,
       "used": true,
-      "verbose_name": ""
+      "verbose_name": "IAB Program"
     },
     "model": "name.grouptypename",
     "pk": "program"
@@ -11272,7 +11881,7 @@
       "name": "Directorate (with reviews)",
       "order": 0,
       "used": true,
-      "verbose_name": ""
+      "verbose_name": "Review Team"
     },
     "model": "name.grouptypename",
     "pk": "review"
@@ -11335,8 +11944,8 @@
   {
     "fields": {
       "default_offset_days": -19,
-      "desc": "Internet Draft submission cut-off for -00 drafts by UTC 23:59",
-      "name": "00 ID Cutoff",
+      "desc": "Internet-Draft submission cut-off for -00 I-Ds by UTC 23:59",
+      "name": "00 I-D Cutoff",
       "order": 0,
       "used": false
     },
@@ -11346,8 +11955,8 @@
   {
     "fields": {
       "default_offset_days": -12,
-      "desc": "Internet Draft submission cut-off for revised (-01 and above) drafts by UTC 23:59",
-      "name": "01 ID Cutoff",
+      "desc": "Internet-Draft submission cut-off for revised (-01 and above) I-Ds by UTC 23:59",
+      "name": "01 I-D Cutoff",
       "order": 0,
       "used": false
     },
@@ -11357,7 +11966,7 @@
   {
     "fields": {
       "default_offset_days": -57,
-      "desc": "Cut-off date for BOF proposal requests. To request a BOF, please see instructions at https://www.ietf.org/how/bofs/bof-procedures on Requesting a BOF",
+      "desc": "Cut-off date for BOF proposal requests. To request a __BoF__ session use the [IETF BoF Request Tool](/doc/bof-requests).",
       "name": "Cut-off preliminary BOF requests",
       "order": 0,
       "used": true
@@ -11368,7 +11977,7 @@
   {
     "fields": {
       "default_offset_days": -57,
-      "desc": "Preliminary BOF proposals requested. To request a BOF, please see instructions on requesting a BOF at https://www.ietf.org/how/bofs/bof-procedures/",
+      "desc": "Preliminary BOF proposals requested. To request a __BoF__ session use the [IETF BoF Request Tool](/doc/bof-requests).",
       "name": "Preliminary BOF proposals requested",
       "order": 0,
       "used": false
@@ -11401,7 +12010,7 @@
   {
     "fields": {
       "default_offset_days": -43,
-      "desc": "Cut-off date for BOF proposal requests to Area Directors at UTC 23:59",
+      "desc": "Cut-off date for BOF proposal requests to Area Directors at UTC 23:59. To request a __BoF__ session use the [IETF BoF Request Tool](/doc/bof-requests).",
       "name": "Cut-off BOF scheduling Requests",
       "order": 0,
       "used": false
@@ -11445,7 +12054,7 @@
   {
     "fields": {
       "default_offset_days": -43,
-      "desc": "Cut-off date for requests to schedule Working Group Meetings at UTC 23:59",
+      "desc": "Cut-off date for requests to schedule Working Group Meetings at UTC 23:59. To request a __Working Group__ session, use the [IETF Meeting Session Request Tool](/secr/sreq/).",
       "name": "Cut-off WG scheduling Requests",
       "order": 0,
       "used": true
@@ -11466,11 +12075,22 @@
   },
   {
     "fields": {
+      "default_offset_days": -12,
+      "desc": "Early registration and payment cut-off at UTC 23:59",
+      "name": "Early cutoff",
+      "order": 0,
+      "used": true
+    },
+    "model": "name.importantdatename",
+    "pk": "early"
+  },
+  {
+    "fields": {
       "default_offset_days": -47,
       "desc": "Early Bird registration and payment cut-off at UTC 23:59",
       "name": "Earlybird cutoff",
       "order": 0,
-      "used": true
+      "used": false
     },
     "model": "name.importantdatename",
     "pk": "earlybird"
@@ -11489,8 +12109,8 @@
   {
     "fields": {
       "default_offset_days": -12,
-      "desc": "Internet Draft submission cut-off (for all drafts, including -00) by UTC 23:59",
-      "name": "ID Cutoff",
+      "desc": "Internet-Draft submission cut-off (for all Internet-Drafts, including -00) by UTC 23:59. Upload using the [I-D Submission Tool](/submit/).",
+      "name": "I-D Cutoff",
       "order": 0,
       "used": true
     },
@@ -11522,7 +12142,7 @@
   {
     "fields": {
       "default_offset_days": -82,
-      "desc": "IETF Online Registration Opens",
+      "desc": "IETF Online Registration Opens [Register Here](https://www.ietf.org/how/meetings/register/).",
       "name": "Registration Opens",
       "order": 0,
       "used": true
@@ -11533,7 +12153,7 @@
   {
     "fields": {
       "default_offset_days": -89,
-      "desc": "Working Group and BOF scheduling begins",
+      "desc": "Working Group and BOF scheduling begins. To request a Working Group session, use the [IETF Meeting Session Request Tool](/secr/sreq/). If you are working on a BOF request, it is highly recommended to tell the IESG now by sending an [email to iesg@ietf.org](mailtp:iesg@ietf.org) to get advance help with the request.",
       "name": "Scheduling Opens",
       "order": 0,
       "used": true
@@ -11591,10 +12211,21 @@
       "desc": "Standard rate registration and payment cut-off at UTC 23:59.",
       "name": "Standard rate registration ends",
       "order": 18,
-      "used": true
+      "used": false
     },
     "model": "name.importantdatename",
     "pk": "stdratecutoff"
+  },
+  {
+    "fields": {
+      "default_offset_days": -47,
+      "desc": "Super Early registration cutoff at UTC 23:59",
+      "name": "Super Early cutoff",
+      "order": 0,
+      "used": true
+    },
+    "model": "name.importantdatename",
+    "pk": "superearly"
   },
   {
     "fields": {
@@ -11719,6 +12350,16 @@
   {
     "fields": {
       "desc": "",
+      "name": "Removed Objectively False",
+      "order": 5,
+      "used": true
+    },
+    "model": "name.iprdisclosurestatename",
+    "pk": "removed_objfalse"
+  },
+  {
+    "fields": {
+      "desc": "",
       "name": "Changed disclosure metadata",
       "order": 0,
       "used": true
@@ -11825,6 +12466,16 @@
     },
     "model": "name.ipreventtypename",
     "pk": "removed"
+  },
+  {
+    "fields": {
+      "desc": "",
+      "name": "Removed Objectively False",
+      "order": 0,
+      "used": true
+    },
+    "model": "name.ipreventtypename",
+    "pk": "removed_objfalse"
   },
   {
     "fields": {
@@ -12739,6 +13390,16 @@
   {
     "fields": {
       "desc": "",
+      "name": "Lead Maintainer",
+      "order": 0,
+      "used": true
+    },
+    "model": "name.rolename",
+    "pk": "leadmaintainer"
+  },
+  {
+    "fields": {
+      "desc": "",
       "name": "Liaison Manager",
       "order": 4,
       "used": true
@@ -12941,7 +13602,7 @@
       "desc": "Flipchars",
       "name": "Flipcharts",
       "order": 0,
-      "used": true
+      "used": false
     },
     "model": "name.roomresourcename",
     "pk": "flipcharts"
@@ -12991,7 +13652,7 @@
       "desc": "Experimental Room Setup (U-Shape and classroom, subject to availability)",
       "name": "Experimental Room Setup (U-Shape and classroom)",
       "order": 0,
-      "used": true
+      "used": false
     },
     "model": "name.roomresourcename",
     "pk": "u-shape"
@@ -13410,13 +14071,43 @@
   },
   {
     "fields": {
-      "desc": "Legacy stream",
+      "desc": "Legacy",
       "name": "Legacy",
       "order": 6,
       "used": true
     },
     "model": "name.streamname",
     "pk": "legacy"
+  },
+  {
+    "fields": {
+      "desc": "Action items section",
+      "name": "Action Items",
+      "order": 3,
+      "used": true
+    },
+    "model": "name.telechatagendasectionname",
+    "pk": "action_items"
+  },
+  {
+    "fields": {
+      "desc": "Minutes section",
+      "name": "Minutes",
+      "order": 2,
+      "used": true
+    },
+    "model": "name.telechatagendasectionname",
+    "pk": "minutes"
+  },
+  {
+    "fields": {
+      "desc": "Roll call section",
+      "name": "Roll Call",
+      "order": 1,
+      "used": true
+    },
+    "model": "name.telechatagendasectionname",
+    "pk": "roll_call"
   },
   {
     "fields": {
@@ -16111,49 +16802,5 @@
     },
     "model": "stats.countryalias",
     "pk": 303
-  },
-  {
-    "fields": {
-      "command": "xym",
-      "switch": "--version",
-      "time": "2022-10-12T00:09:36.629Z",
-      "used": true,
-      "version": "xym 0.5"
-    },
-    "model": "utils.versioninfo",
-    "pk": 1
-  },
-  {
-    "fields": {
-      "command": "pyang",
-      "switch": "--version",
-      "time": "2022-10-12T00:09:36.945Z",
-      "used": true,
-      "version": "pyang 2.5.3"
-    },
-    "model": "utils.versioninfo",
-    "pk": 2
-  },
-  {
-    "fields": {
-      "command": "yanglint",
-      "switch": "--version",
-      "time": "2022-10-12T00:09:36.957Z",
-      "used": true,
-      "version": "yanglint SO 1.9.2"
-    },
-    "model": "utils.versioninfo",
-    "pk": 3
-  },
-  {
-    "fields": {
-      "command": "xml2rfc",
-      "switch": "--version",
-      "time": "2022-10-12T00:09:37.890Z",
-      "used": true,
-      "version": "xml2rfc 3.14.2"
-    },
-    "model": "utils.versioninfo",
-    "pk": 4
   }
 ]

@@ -11,7 +11,7 @@ from django.utils.html import strip_tags
 from django.conf import settings
 from django.urls import reverse as urlreverse
 from django.utils import timezone
-from django.utils.encoding import force_text
+from django.utils.encoding import force_str
 
 import debug                            # pyflakes:ignore
 from ietf.doc.templatetags.mail_filters import std_level_prompt
@@ -19,7 +19,7 @@ from ietf.doc.templatetags.mail_filters import std_level_prompt
 from ietf.utils import log
 from ietf.utils.mail import send_mail, send_mail_text
 from ietf.ipr.utils import iprs_from_docs, related_docs
-from ietf.doc.models import WriteupDocEvent, LastCallDocEvent, DocAlias, ConsensusDocEvent
+from ietf.doc.models import WriteupDocEvent, LastCallDocEvent, ConsensusDocEvent
 from ietf.doc.utils import needed_ballot_positions
 from ietf.doc.utils_bofreq import bofreq_editors, bofreq_responsible
 from ietf.group.models import Role
@@ -54,7 +54,7 @@ def email_ad_approved_doc(request, doc, text):
 
 def email_ad_approved_conflict_review(request, review, ok_to_publish):
     """Email notification when AD approves a conflict review"""
-    conflictdoc = review.relateddocument_set.get(relationship__slug='conflrev').target.document
+    conflictdoc = review.relateddocument_set.get(relationship__slug='conflrev').target
     (to, cc) = gather_address_lists("ad_approved_conflict_review")
     frm = request.user.person.formatted_email()
     send_mail(request,
@@ -98,7 +98,7 @@ def email_stream_changed(request, doc, old_stream, new_stream, text=""):
     text = strip_tags(text)
 
     send_mail(request, to, None,
-              "ID Tracker Stream Change Notice: %s" % doc.file_tag(),
+              "I-D Tracker Stream Change Notice: %s" % doc.file_tag(),
               "doc/mail/stream_changed_email.txt",
               dict(text=text,
                    url=settings.IDTRACKER_BASE_URL + doc.get_absolute_url()),
@@ -175,7 +175,7 @@ def generate_ballot_writeup(request, doc):
     e.doc = doc
     e.rev = doc.rev
     e.desc = "Ballot writeup was generated"
-    e.text = force_text(render_to_string("doc/mail/ballot_writeup.txt", {'iana': iana}))
+    e.text = force_str(render_to_string("doc/mail/ballot_writeup.txt", {'iana': iana, 'doc': doc }))
 
     # caller is responsible for saving, if necessary
     return e
@@ -187,7 +187,7 @@ def generate_ballot_rfceditornote(request, doc):
     e.doc = doc
     e.rev = doc.rev
     e.desc = "RFC Editor Note for ballot was generated"
-    e.text = force_text(render_to_string("doc/mail/ballot_rfceditornote.txt"))
+    e.text = force_str(render_to_string("doc/mail/ballot_rfceditornote.txt"))
     e.save()
     
     return e
@@ -202,7 +202,7 @@ def generate_last_call_announcement(request, doc):
 
     doc.filled_title = textwrap.fill(doc.title, width=70, subsequent_indent=" " * 3)
     
-    iprs = iprs_from_docs(related_docs(DocAlias.objects.get(name=doc.canonical_name())))
+    iprs = iprs_from_docs(related_docs(Document.objects.get(name=doc.name)))
     if iprs:
         ipr_links = [ urlreverse("ietf.ipr.views.show", kwargs=dict(id=i.id)) for i in iprs]
         ipr_links = [ settings.IDTRACKER_BASE_URL+url if not url.startswith("http") else url for url in ipr_links ]
@@ -232,7 +232,7 @@ def generate_last_call_announcement(request, doc):
     e.doc = doc
     e.rev = doc.rev
     e.desc = "Last call announcement was generated"
-    e.text = force_text(mail)
+    e.text = force_str(mail)
 
     # caller is responsible for saving, if necessary
     return e
@@ -252,7 +252,7 @@ def generate_approval_mail(request, doc):
     e.doc = doc
     e.rev = doc.rev
     e.desc = "Ballot approval text was generated"
-    e.text = force_text(mail)
+    e.text = force_str(mail)
 
     # caller is responsible for saving, if necessary
     return e
@@ -288,7 +288,7 @@ def generate_approval_mail_approved(request, doc):
     else:
         contacts = "The IESG contact person is %s." % responsible_directors[0]
 
-    doc_type = "RFC" if doc.get_state_slug() == "rfc" else "Internet Draft"
+    doc_type = "RFC" if doc.get_state_slug() == "rfc" else "Internet-Draft"
         
     addrs = gather_address_lists('ballot_approved_ietf_stream',doc=doc).as_strings()
     return render_to_string("doc/mail/approval_mail.txt",
@@ -308,7 +308,7 @@ def generate_approval_mail_rfc_editor(request, doc):
     # This is essentially dead code - it is only exercised if the IESG ballots on some other stream's document,
     # which does not happen now that we have conflict reviews.
     disapproved = doc.get_state_slug("draft-iesg") in DO_NOT_PUBLISH_IESG_STATES
-    doc_type = "RFC" if doc.get_state_slug() == "rfc" else "Internet Draft"
+    doc_type = "RFC" if doc.get_state_slug() == "rfc" else "Internet-Draft"
     addrs = gather_address_lists('ballot_approved_conflrev', doc=doc).as_strings()
 
     return render_to_string("doc/mail/approval_mail_rfc_editor.txt",
@@ -333,6 +333,9 @@ def generate_publication_request(request, doc):
 
     if doc.stream_id == "irtf":
         approving_body = "IRSG"
+        consensus_body = doc.group.acronym.upper()
+    if doc.stream_id == "editorial":
+        approving_body = "RSAB"
         consensus_body = doc.group.acronym.upper()
     else:
         approving_body = str(doc.stream)
@@ -486,6 +489,54 @@ def email_irsg_ballot_closed(request, doc, ballot):
         "doc/mail/close_irsg_ballot_mail.txt",
     )
 
+def _send_rsab_ballot_email(request, doc, ballot, subject, template):
+    """Send email notification when IRSG ballot is issued"""
+    (to, cc) = gather_address_lists('rsab_ballot_issued', doc=doc)
+    sender = 'IESG Secretary <iesg-secretary@ietf.org>'
+
+    active_ballot = doc.active_ballot()
+    if active_ballot is None:
+        needed_bps = ''
+    else:
+        needed_bps = needed_ballot_positions(
+            doc,
+            list(active_ballot.active_balloter_positions().values())
+        )
+
+    return send_mail(
+        request=request,
+        frm=sender,
+        to=to,
+        cc=cc,
+        subject=subject,
+        extra={'Reply-To': [sender]},
+        template=template,
+        context=dict(
+            doc=doc,
+            doc_url=settings.IDTRACKER_BASE_URL + doc.get_absolute_url(),
+            needed_ballot_positions=needed_bps,
+        ))
+
+def email_rsab_ballot_issued(request, doc, ballot):
+    """Send email notification when RSAB ballot is issued"""
+    return _send_rsab_ballot_email(
+        request,
+        doc,
+        ballot,
+        'RSAB ballot issued: %s to %s'%(doc.file_tag(), std_level_prompt(doc)),
+        'doc/mail/issue_rsab_ballot_mail.txt',
+    )
+
+def email_rsab_ballot_closed(request, doc, ballot):
+    """Send email notification when RSAB ballot is closed"""
+    return _send_rsab_ballot_email(
+        request,
+        doc,
+        ballot,
+        'RSAB ballot closed: %s to %s'%(doc.file_tag(), std_level_prompt(doc)),
+        "doc/mail/close_rsab_ballot_mail.txt",
+    )
+
 def email_iana(request, doc, to, msg, cc=None):
     # fix up message and send it with extra info on doc in headers
     import email
@@ -619,7 +670,7 @@ def send_review_possibly_replaces_request(request, doc, submitter_info):
     to = set(addrs.to)
     cc = set(addrs.cc)
 
-    possibly_replaces = Document.objects.filter(name__in=[alias.name for alias in doc.related_that_doc("possibly-replaces")])
+    possibly_replaces = Document.objects.filter(name__in=[related.name for related in doc.related_that_doc("possibly-replaces")])
     for other_doc in possibly_replaces:
         (other_to, other_cc) = gather_address_lists('doc_replacement_suggested',doc=other_doc)
         to.update(other_to)

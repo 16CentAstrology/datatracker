@@ -29,7 +29,7 @@ class MilestoneForm(forms.Form):
     desc = forms.CharField(max_length=500, label="Milestone", required=True)
     due = DatepickerDateField(date_format="MM yyyy", picker_settings={"min-view-mode": "months", "autoclose": "1", "view-mode": "years" }, required=True)
     order = forms.IntegerField(required=True, widget=forms.HiddenInput)
-    docs = SearchableDocumentsField(label="Drafts", required=False, help_text="Any drafts that the milestone concerns.")
+    docs = SearchableDocumentsField(label="Internet-Drafts", required=False, help_text="Any Internet-Drafts that the milestone concerns.")
     resolved_checkbox = forms.BooleanField(required=False, label="Resolved")
     resolved = forms.CharField(label="Resolved as", max_length=50, required=False)
 
@@ -369,7 +369,7 @@ def edit_milestones(request, acronym, group_type=None, milestone_set="current"):
                     email_milestones_changed(request, group, changes, states)
 
                 if milestone_set == "charter":
-                    return redirect('ietf.doc.views_doc.document_main', name=group.charter.canonical_name())
+                    return redirect('ietf.doc.views_doc.document_main', name=group.charter.name)
                 else:
                     return HttpResponseRedirect(group.about_url())
     else:
@@ -399,7 +399,7 @@ def edit_milestones(request, acronym, group_type=None, milestone_set="current"):
                        can_change_uses_milestone_dates=can_change_uses_milestone_dates))
 
 @login_required
-def reset_charter_milestones(request, group_type, acronym):
+def reset_charter_milestones(request, acronym, group_type=None):
     """Reset charter milestones to the currently in-use milestones."""
     group = get_group_or_404(acronym, group_type)
     if not group.features.has_milestones:

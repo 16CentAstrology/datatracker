@@ -36,12 +36,14 @@ from ietf.utils.pipe import pipe
 from ietf.utils.text import xslugify
 
 
-def get_meeting(num=None,type_in=['ietf',],days=28):
+def get_meeting(num=None, type_in=('ietf',), days=28):
     meetings = Meeting.objects
-    if type_in:
+    if type_in is not None:
         meetings = meetings.filter(type__in=type_in)
-    if num == None:
-        meetings = meetings.filter(date__gte=timezone.now()-datetime.timedelta(days=days)).order_by('date')
+    if num is None:
+        meetings = meetings.filter(
+            date__gte=timezone.now() - datetime.timedelta(days=days)
+        ).order_by('date')
     else:
         meetings = meetings.filter(number=num)
     if meetings.exists():
@@ -102,7 +104,7 @@ def preprocess_assignments_for_agenda(assignments_queryset, meeting, extra_prefe
                 queryset=add_event_info_to_session_qs(Session.objects.all().prefetch_related(
                     'group', 'group__charter', 'group__charter__group',
                     Prefetch('materials',
-                             queryset=Document.objects.exclude(states__type=F("type"), states__slug='deleted').order_by('sessionpresentation__order').prefetch_related('states'),
+                             queryset=Document.objects.exclude(states__type=F("type"), states__slug='deleted').order_by('presentations__order').prefetch_related('states'),
                              to_attr='prefetched_active_materials'
                     )
                 ))
@@ -124,7 +126,7 @@ def preprocess_assignments_for_agenda(assignments_queryset, meeting, extra_prefe
             # check before blindly assigning to meeting just in case.
             if a.session.meeting.pk == meeting.pk:
                 a.session.meeting = meeting
-            a.session.order_number = None
+            a.session.order_number = a.session.order_in_meeting() if a.session.group else None
 
             if a.session.group and a.session.group not in groups:
                 groups.append(a.session.group)
@@ -133,12 +135,6 @@ def preprocess_assignments_for_agenda(assignments_queryset, meeting, extra_prefe
     for a in assignments:
         if a.session and a.session.group:
             sessions_for_groups[(a.session.group, a.session.type_id)].append(a)
-
-    for a in assignments:
-        if a.session and a.session.group:
-
-            l = sessions_for_groups.get((a.session.group, a.session.type_id), [])
-            a.session.order_number = l.index(a) + 1 if a in l else 0
 
     timeslot_by_session_pk = {a.session_id: a.timeslot for a in assignments}
 
@@ -321,10 +317,21 @@ class AgendaFilterOrganizer(AgendaKeywordTool):
         groups = set(self._get_group(s) for s in self.sessions
                      if s
                      and self._get_group(s))
-        log.assertion('len(groups) == len(set(g.acronym for g in groups))')  # no repeated acros
+        # Verify that we're not using the same acronym for more than one distinct group, accounting for
+        # the possibility that some groups are GroupHistory instances. This assertion will fail if a Group
+        # and GroupHistory for the same group have a different acronym - in that event, the filter will
+        # not match the meeting display, so we should be alerted that this has actually occurred.
+        log.assertion(
+            "len(set(getattr(g, 'group_id', g.id) for g in groups)) "
+            "== len(set(g.acronym for g in groups))"
+        )
 
         group_parents = set(self._get_group_parent(g) for g in groups if self._get_group_parent(g))
-        log.assertion('len(group_parents) == len(set(gp.acronym for gp in group_parents))')  # no repeated acros
+        # See above for explanation of this assertion
+        log.assertion(
+            "len(set(getattr(gp, 'group_id', gp.id) for gp in group_parents)) "
+            "== len(set(gp.acronym for gp in group_parents))"
+        )
 
         all_groups = groups.union(group_parents)
         all_groups.difference_update([g for g in all_groups if g.acronym in self.exclude_acronyms])
@@ -642,6 +649,11 @@ def read_session_file(type, num, doc):
 def read_agenda_file(num, doc):
     return read_session_file('agenda', num, doc)
 
+# TODO-BLOBSTORE: this is _yet another_ draft derived variant created when users
+# ask for drafts from the meeting agenda page. Consider whether to refactor this
+# now to not call out to external binaries, and consider whether we need this extra
+# format at all in the draft blobstore. if so, it would probably be stored under 
+# something like plainpdf/ 
 def convert_draft_to_pdf(doc_name):
     inpath = os.path.join(settings.IDSUBMIT_REPOSITORY_PATH, doc_name + ".txt")
     outpath = os.path.join(settings.INTERNET_DRAFT_PDF_PATH, doc_name + ".pdf")
@@ -830,7 +842,7 @@ def get_announcement_initial(meeting, is_change=False):
         desc=desc,
         date=meeting.date,
         change=change)
-    body = render_to_string('meeting/interim_announcement.txt', locals())
+    body = render_to_string('meeting/interim_announcement.txt', locals() | {"settings": settings})
     initial['body'] = body
     return initial
 
@@ -883,7 +895,7 @@ def make_materials_directories(meeting):
     # was merged with the regular datatracker code; then in secr/proceedings/views.py
     # in make_directories())
     saved_umask = os.umask(0)   
-    for leaf in ('slides','agenda','minutes','id','rfc','bluesheets'):
+    for leaf in ('slides','agenda','minutes', 'narrativeminutes', 'id','rfc','bluesheets'):
         target = os.path.join(path,leaf)
         if not os.path.exists(target):
             os.makedirs(target)
@@ -1092,6 +1104,7 @@ def create_interim_session_conferences(sessions):
             try:
                 confs = meetecho_manager.create(
                     group=session.group,
+                    session_id=session.pk,
                     description=str(session),
                     start_time=ts.utc_start_time(),
                     duration=ts.duration,
